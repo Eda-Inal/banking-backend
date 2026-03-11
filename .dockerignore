@@ -1,0 +1,25 @@
+node_modules
+npm-debug.log*
+
+dist
+build
+tmp
+.temp
+.tmp
+
+# Git
+.git
+.gitignore
+
+.env
+.env.*
+!.env.example
+
+logs
+*.log
+
+.idea
+.vscode
+*.swp
+.DS_Store
+Thumbs.db
