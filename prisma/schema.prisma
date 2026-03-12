@@ -7,3 +7,120 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+enum Account_Status {
+  ACTIVE 
+  FROZEN  
+  CLOSED
+}
+
+enum Currency {
+  TRY
+  USD
+  EUR
+}
+
+enum AccountStatus {
+  ACTIVE
+  FROZEN
+  CLOSED
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAW
+  TRANSFER
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REJECTED
+}
+
+enum Action {
+  DEPOSIT
+  WITHDRAW
+  TRANSFER
+  LOGIN
+  LOGOUT
+}
+
+enum EventStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+model Customer {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  phone     String
+
+  accounts  Account[]
+  audit AuditLog[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("customers")
+}
+
+model Account {
+  id         String   @id @default(uuid())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  balance    Decimal  @db.Decimal(18,2)
+  currency   Currency @default(TRY)
+  status     AccountStatus @default(ACTIVE)
+
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([customerId])
+  @@map("accounts")
+}
+
+model Transaction {
+  id          String             @id @default(uuid())
+  type        TransactionType    @default(DEPOSIT)
+  fromAccount String?            @map("from_account")
+  toAccount   String?            @map("to_account")
+  amount      Decimal            @db.Decimal(18,2)
+  status      TransactionStatus  @default(PENDING)
+  referenceId String             @map("reference_id")
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  @@map("transactions")
+  @@index([fromAccount])
+  @@index([toAccount])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  action     Action   @default(LOGIN)
+  
+  customerId String
+  user       Customer @relation(fields: [customerId], references: [id])
+  
+  entityType String
+  entityId   String   @db.Uuid
+  
+  timestamp  DateTime @default(now())
+
+  @@map("audit_logs")
+  @@index([customerId])
+}
+
+model Event {
+  id        String      @id @default(uuid()) @db.Uuid
+  type      String
+  payload   Json
+  status    EventStatus @default(PENDING)
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  @@map("events")
+}
