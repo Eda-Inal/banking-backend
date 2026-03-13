@@ -8,11 +8,6 @@ datasource db {
   provider = "postgresql"
 }
 
-enum Account_Status {
-  ACTIVE 
-  FROZEN  
-  CLOSED
-}
 
 enum Currency {
   TRY
@@ -52,15 +47,20 @@ enum EventStatus {
   PROCESSED
   FAILED
 }
+enum TokenBlacklistType{
+  ACCESS
+  REFRESH
+}
 
 model Customer {
   id        String   @id @default(uuid())
   email     String   @unique
   name      String
   phone     String
-
+  passwordHash  String  @map("password_hash")
   accounts  Account[]
   audit AuditLog[]
+  tokenBlacklist TokenBlacklist[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -68,13 +68,28 @@ model Customer {
   @@map("customers")
 }
 
+model TokenBlacklist {
+  id          String   @id @default(uuid())
+  jti         String   @unique
+  customerId  String   @map("customer_id")
+  customer    Customer @relation(fields: [customerId], references: [id])
+  tokenType   TokenBlacklistType @map("token_type")
+  revokedAt   DateTime @default(now()) @map("revoked_at")
+  expiresAt   DateTime @map("expires_at")
+  deviceInfo  String?  @map("device_info")
+  ipAddress   String?  @map("ip_address")
+  reason      String?
+
+  @@map("token_blacklist")
+}
+
 model Account {
   id         String   @id @default(uuid())
 
-  customerId String
+  customerId String   @map("customer_id")
   customer   Customer @relation(fields: [customerId], references: [id])
 
-  balance    Decimal  @db.Decimal(18,2)
+  balance    Decimal  @default(0) @db.Decimal(18,2)
   currency   Currency @default(TRY)
   status     AccountStatus @default(ACTIVE)
 
@@ -86,7 +101,7 @@ model Account {
 
 model Transaction {
   id          String             @id @default(uuid())
-  type        TransactionType    @default(DEPOSIT)
+  type        TransactionType   
   fromAccount String?            @map("from_account")
   toAccount   String?            @map("to_account")
   amount      Decimal            @db.Decimal(18,2)
@@ -101,14 +116,14 @@ model Transaction {
 
 model AuditLog {
   id         String   @id @default(uuid())
-  action     Action   @default(LOGIN)
-  
-  customerId String
+  action     Action
+
+  customerId String   @map("customer_id")
   user       Customer @relation(fields: [customerId], references: [id])
-  
-  entityType String
-  entityId   String   @db.Uuid
-  
+
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id") @db.Uuid
+
   timestamp  DateTime @default(now())
 
   @@map("audit_logs")
