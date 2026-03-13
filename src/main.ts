@@ -5,6 +5,7 @@ import { CONFIG_KEYS } from './config/config';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { SuccessResponseInterceptor } from './common/interceptors/success-response.interceptor';
 import { ValidationPipe } from '@nestjs/common';
+import * as cookieParser from 'cookie-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -18,6 +19,7 @@ async function bootstrap() {
     transform: true,
     forbidNonWhitelisted: true,
   }));
+  app.use(cookieParser());
   await app.listen(port);
 }
 bootstrap();
