@@ -12,13 +12,15 @@ import { Request } from 'express';
 import { v4 as uuid } from 'uuid';
 import { JwtPayload } from './jwt-payload.interface';
 import * as crypto from 'crypto';
+import { AccountLockedException } from './exceptions/account-locked.exception';
+import { Prisma } from '../generated/prisma/client';
 
 interface LoginWithRefresh extends LoginResponseDto {
-  refreshToken: string;
+    refreshToken: string;
 }
 
 interface RefreshResult extends LoginResponseDto {
-  refreshToken: string;
+    refreshToken: string;
 }
 
 @Injectable()
@@ -60,7 +62,7 @@ export class AuthService {
 
         const { email, password } = loginRequestDto;
 
-        const customer = await this.prisma.customer.findUnique({
+        let customer = await this.prisma.customer.findUnique({
             where: {
                 email,
             },
@@ -69,11 +71,54 @@ export class AuthService {
         if (!customer) {
             throw new UnauthorizedException('Invalid credentials');
         }
+        const now = new Date();
+        if (customer.lockUntil && customer.lockUntil > now) {
+            throw new AccountLockedException('Account temporarily locked due to too many failed attempts. Try again later.');
+        }
+        if (customer.lockUntil != null && customer.lockUntil <= now) {
+            customer = await this.prisma.customer.update({
+                where: { id: customer.id },
+                data: { failedLoginAttempts: 0, lockUntil: null },
+            });
+        }
+        const threshold = Number(this.config.get(CONFIG_KEYS.LOGIN_LOCK_THRESHOLD)) || 5;
+        const durationMinutes = Number(this.config.get(CONFIG_KEYS.LOGIN_LOCK_DURATION_MINUTES)) || 15;
+        const delayCapSeconds = Number(this.config.get(CONFIG_KEYS.LOGIN_DELAY_CAP_SECONDS)) || 30;
+
 
         const isPasswordValid = await bcrypt.compare(password, customer.passwordHash);
         if (!isPasswordValid) {
+            const rows = await this.prisma.$queryRaw<
+                { failed_login_attempts: number; lock_until: Date | null }[]
+            >(
+                Prisma.sql`
+                    UPDATE customers
+                    SET
+                        failed_login_attempts = failed_login_attempts + 1,
+                        lock_until = CASE
+                            WHEN failed_login_attempts + 1 >= ${threshold} THEN NOW() + (${durationMinutes} * interval '1 minute')
+                            ELSE lock_until
+                        END
+                    WHERE id = ${customer.id}
+                    RETURNING failed_login_attempts, lock_until
+                `,
+            );
+
+            const updated = rows[0];
+            if (!updated) throw new UnauthorizedException('Invalid credentials');
+
+            const newAttempts = updated.failed_login_attempts;
+
+            const delaySeconds = Math.min(delayCapSeconds, Math.pow(2, newAttempts));
+            await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+
             throw new UnauthorizedException('Invalid credentials');
         }
+
+        await this.prisma.customer.update({
+            where: { id: customer.id },
+            data: { failedLoginAttempts: 0, lockUntil: null },
+        });
 
         const accessPayload: JwtPayload = {
             sub: customer.id
@@ -100,11 +145,9 @@ export class AuthService {
             },
         });
 
-        const user = {
-            id: customer.id,
-            email: customer.email,
-            name: customer.name,
-        }
+        const { id, name } = customer;
+        const user = { id, email, name };
+
         const expiresIn =
             Number(this.config.get(CONFIG_KEYS.JWT_ACCESS_EXPIRES_IN)) || 900;
         return {
@@ -128,7 +171,9 @@ export class AuthService {
             .update(rawRefreshToken)
             .digest('hex');
 
-        const refreshTokenRecord = await this.prisma.refreshToken.findFirst({
+
+
+        const refreshTokenRecord = await this.prisma.refreshToken.findUnique({
             where: { tokenHash },
             include: {
                 customer: true,
@@ -179,22 +224,19 @@ export class AuthService {
         });
         const accessPayload: JwtPayload = { sub: customer.id };
         const accessToken = await this.jwtService.signAsync(accessPayload);
-        
+
         const expiresIn =
-          Number(this.config.get(CONFIG_KEYS.JWT_ACCESS_EXPIRES_IN)) || 900;
-        
-        const user = {
-          id: customer.id,
-          email: customer.email,
-          name: customer.name,
-        };
-        
+            Number(this.config.get(CONFIG_KEYS.JWT_ACCESS_EXPIRES_IN)) || 900;
+
+       const {id, email, name} = customer;
+       const user = {id, email, name};
+
         return {
-          accessToken,
-          refreshToken: newRawRefreshToken,
-          expiresIn,
-          tokenType: 'Bearer',
-          user,
+            accessToken,
+            refreshToken: newRawRefreshToken,
+            expiresIn,
+            tokenType: 'Bearer',
+            user,
         };
     }
 
@@ -209,7 +251,7 @@ export class AuthService {
             .update(rawRefreshToken)
             .digest('hex');
 
-        const refreshTokenRecord = await this.prisma.refreshToken.findFirst({
+        const refreshTokenRecord = await this.prisma.refreshToken.findUnique({
             where: { tokenHash },
         });
         if (refreshTokenRecord && !refreshTokenRecord.revokedAt) {

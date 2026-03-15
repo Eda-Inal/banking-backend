@@ -55,6 +55,9 @@ model Customer {
   name      String
   phone     String
   passwordHash  String  @map("password_hash")
+
+  failedLoginAttempts  Int      @default(0) @map("failed_login_attempts")
+  lockUntil            DateTime? @map("lock_until")
   accounts  Account[]
   audit AuditLog[]
   refreshTokens RefreshToken[]
@@ -70,7 +73,7 @@ model RefreshToken {
   customerId   String    @map("customer_id")
   customer     Customer  @relation(fields: [customerId], references: [id])
 
-  tokenHash    String    @map("token_hash")
+  tokenHash    String    @map("token_hash") @unique
   deviceId     String?   @map("device_id")
   ipAddress    String?   @map("ip_address")
   userAgent    String?   @map("user_agent")
