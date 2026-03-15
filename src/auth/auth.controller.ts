@@ -1,12 +1,11 @@
-import { Controller, Post, Body, Res, Req } from '@nestjs/common';
+import { Controller, Post, Body, Res, Req, UseGuards } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { RegisterRequestDto } from './dto/register-request.dto';
 import { RegisterResponseDto } from './dto/register-response.dto';
 import { LoginRequestDto } from './dto/login-request.dto';
 import { LoginResponseDto } from './dto/login-response.dto';
 import type { Response, Request } from 'express';
-import { RefreshTokenRequestDto } from './dto/refresh-token-request.dto';
-
+import { LoginRateLimitGuard } from './guards/login-rate-limit.guard';
 
 @Controller('auth')
 export class AuthController {
@@ -18,6 +17,7 @@ export class AuthController {
     return this.authService.register(registerRequestDto);
   }
 
+  @UseGuards(LoginRateLimitGuard)
   @Post('login')
   async login(
     @Body() loginRequestDto: LoginRequestDto,

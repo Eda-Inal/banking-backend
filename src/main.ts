@@ -20,6 +20,13 @@ async function bootstrap() {
     forbidNonWhitelisted: true,
   }));
   app.use(cookieParser());
+
+  // Proxy (Nginx, load balancer, Cloudflare) 
+  const expressApp = app.getHttpAdapter().getInstance?.();
+  if (expressApp && typeof expressApp.set === 'function') {
+    expressApp.set('trust proxy', 1);
+  }
+
   await app.listen(port);
 }
 bootstrap();
