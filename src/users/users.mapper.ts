@@ -1,6 +1,6 @@
 import { UserMeResponseDto } from './dto/user-me-response.dto';
 import type { Account, Customer } from '../generated/prisma/client';
-import { accountMapper } from '../account/accounts.mapper';
+import { accountMapper } from '../accounts/accounts.mapper';
 
 export const userMapper = {
   toMeResponseDto(user: Customer & { accounts: Account[] }): UserMeResponseDto {

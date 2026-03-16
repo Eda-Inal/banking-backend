@@ -1,4 +1,4 @@
-import { AccountSummaryDto } from '../../account/dto/account-summary.dto';
+import { AccountSummaryDto } from '../../accounts/dto/account-summary.dto';
 
 export class UserMeResponseDto {
     id: string;
