@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, Logger, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AccountResponseDto } from './dto/account-response.dto';
 import { accountMapper } from './accounts.mapper';
-
+import { CreateAccountRequestDto } from './dto/create-account-request.dto';
+import { AccountStatus } from '../common/enums';
 
 
 
@@ -10,8 +11,8 @@ import { accountMapper } from './accounts.mapper';
 export class AccountsService {
     private readonly logger = new Logger(AccountsService.name);
 
-    constructor(private readonly prisma: PrismaService) {}
-    
+    constructor(private readonly prisma: PrismaService) { }
+
     async getAccounts(userId: string): Promise<AccountResponseDto[]> {
         const accounts = await this.prisma.account.findMany({
             where: { customerId: userId },
@@ -33,6 +34,100 @@ export class AccountsService {
 
         this.logger.log(`Account fetched: ${id} for user ${userId}`);
 
+        return accountMapper.toResponseDto(account);
+    }
+
+    async createAccount(userId: string, createAccountRequestDto: CreateAccountRequestDto): Promise<AccountResponseDto> {
+        const { currency } = createAccountRequestDto;
+
+        const accountExists = await this.prisma.account.findFirst({
+            where: {
+                customerId: userId,
+                currency,
+                status: { not: AccountStatus.CLOSED },
+            },
+        });
+        if (accountExists) {
+            this.logger.warn(`createAccount: account already exists for user ${userId}, currency ${currency}`);
+            throw new ConflictException(`You already have an account with ${currency}`);
+        }
+
+        const account = await this.prisma.account.create({
+            data: { customerId: userId, currency },
+        });
+        this.logger.log(`Account created: ${account.id} for user ${userId}`);
+        return accountMapper.toResponseDto(account);
+    }
+
+    async freezeAccount(userId: string, id: string): Promise<AccountResponseDto> {
+
+        let account = await this.prisma.account.findFirst({
+            where: { id, customerId: userId },
+        });
+        if (!account) {
+            this.logger.warn(`freezeAccount: account not found for user ${userId}, accountId ${id}`);
+            throw new NotFoundException('Account not found');
+        }
+
+        if (account.status === AccountStatus.CLOSED) {
+            this.logger.warn(`freezeAccount: account is closed for user ${userId}, accountId ${id}`);
+            throw new BadRequestException('Account is closed');
+        }
+        if (account.status === AccountStatus.FROZEN) {
+            this.logger.warn(`freezeAccount: account is already frozen for user ${userId}, accountId ${id}`);
+            throw new BadRequestException('Account is already frozen');
+        }
+        account = await this.prisma.account.update({
+            where: { id, customerId: userId },
+            data: { status: AccountStatus.FROZEN },
+        });
+        this.logger.log(`Account frozen: ${id} for user ${userId}`);
+        return accountMapper.toResponseDto(account);
+    }
+
+    async unfreezeAccount(userId: string, id: string): Promise<AccountResponseDto> {
+
+        let account = await this.prisma.account.findFirst({
+            where: { id, customerId: userId },
+        });
+        if (!account) {
+            this.logger.warn(`unfreezeAccount: account not found for user ${userId}, accountId ${id}`);
+            throw new NotFoundException('Account not found');
+        }
+        if (account.status === AccountStatus.CLOSED) {
+            this.logger.warn(`unfreezeAccount: account is closed for user ${userId}, accountId ${id}`);
+            throw new BadRequestException('Account is closed');
+        }
+        if (account.status === AccountStatus.ACTIVE) {
+            this.logger.warn(`unfreezeAccount: account is already active for user ${userId}, accountId ${id}`);
+            throw new BadRequestException('Account is already active');
+        }
+        account = await this.prisma.account.update({
+            where: { id, customerId: userId },
+            data: { status: AccountStatus.ACTIVE },
+        });
+        this.logger.log(`Account unfrozen: ${id} for user ${userId}`);
+        return accountMapper.toResponseDto(account);
+    }
+
+    async closeAccount(userId: string, id: string): Promise<AccountResponseDto> {
+
+        let account = await this.prisma.account.findFirst({
+            where: { id, customerId: userId },
+        });
+        if (!account) {
+            this.logger.warn(`closeAccount: account not found for user ${userId}, accountId ${id}`);
+            throw new NotFoundException('Account not found');
+        }
+        if (account.status === AccountStatus.CLOSED) {
+            this.logger.warn(`closeAccount: account is already closed for user ${userId}, accountId ${id}`);
+            throw new BadRequestException('Account is already closed');
+        }
+        account = await this.prisma.account.update({
+            where: { id, customerId: userId },
+            data: { status: AccountStatus.CLOSED },
+        });
+        this.logger.log(`Account closed: ${id} for user ${userId}`);
         return accountMapper.toResponseDto(account);
     }
 }
