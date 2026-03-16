@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, UnauthorizedException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserMeResponseDto } from './dto/user-me-response.dto';
 import { userMapper } from './users.mapper';
@@ -10,6 +10,8 @@ import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class UsersService {
+    private readonly logger = new Logger(UsersService.name);
+
     constructor(private readonly prisma: PrismaService) { }
 
     async getMe(userId: string): Promise<UserMeResponseDto> {
@@ -18,6 +20,7 @@ export class UsersService {
             include: { accounts: true },
         });
         if (!user) {
+            this.logger.warn(`getMe: user not found for id ${userId}`);
             throw new NotFoundException('User not found');
         }
         return userMapper.toMeResponseDto(user);
@@ -32,6 +35,7 @@ export class UsersService {
         });
 
         if (!user) {
+            this.logger.warn(`putMe: user not found for id ${userId}`);
             throw new NotFoundException('User not found');
         }
         if (email && email !== user.email) {
@@ -39,6 +43,7 @@ export class UsersService {
                 where: { email },
             });
             if (existingUser && existingUser.id !== userId) {
+                this.logger.warn(`putMe: email conflict for ${email} (requested by user ${userId})`);
                 throw new ConflictException('Email already exists');
             }
         }
@@ -54,6 +59,16 @@ export class UsersService {
             include: { accounts: true },
         });
 
+        this.logger.log(
+            `User profile updated: ${updatedUser.id} (${updatedUser.email}) - fields: ${[
+                email ? 'email' : null,
+                name ? 'name' : null,
+                phone ? 'phone' : null,
+            ]
+                .filter(Boolean)
+                .join(', ') || 'none'}`,
+        );
+
         return userMapper.toMeResponseDto(updatedUser);
 
     }
@@ -64,11 +79,13 @@ export class UsersService {
             where: { id: userId },
         });
         if (!user) {
+            this.logger.warn(`patchPassword: user not found for id ${userId}`);
             throw new NotFoundException('User not found');
         }
 
         const isPasswordValid = await bcrypt.compare(oldPassword, user.passwordHash);
         if (!isPasswordValid) {
+            this.logger.warn(`patchPassword: invalid old password for user ${user.id} (${user.email})`);
             throw new UnauthorizedException('Invalid old password');
         }
 
@@ -81,6 +98,7 @@ export class UsersService {
             where: { id: userId },
             data: { passwordHash: hashedNewPassword },
         });
+        this.logger.log(`Password changed for user ${user.id} (${user.email})`);
         return {
             message: 'Password updated successfully',
         };

@@ -1,4 +1,4 @@
-import { Injectable, ConflictException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, ConflictException, UnauthorizedException,Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { RegisterRequestDto } from './dto/register-request.dto';
 import { RegisterResponseDto } from './dto/register-response.dto';
@@ -25,6 +25,7 @@ interface RefreshResult extends LoginResponseDto {
 
 @Injectable()
 export class AuthService {
+    private readonly logger = new Logger(AuthService.name);
     constructor(private readonly prisma: PrismaService, private readonly jwtService: JwtService, private readonly config: ConfigService) { }
 
     async register(registerRequestDto: RegisterRequestDto): Promise<RegisterResponseDto> {
@@ -38,11 +39,13 @@ export class AuthService {
         });
 
         if (customer) {
+            this.logger.warn(`Register attempt with existing email: ${email}`);
             throw new ConflictException('Customer already exists');
         }
 
+
         const hashedPassword = await bcrypt.hash(password, 10);
-        await this.prisma.customer.create({
+       const registeredCustomer = await this.prisma.customer.create({
             data: {
                 email,
                 passwordHash: hashedPassword,
@@ -50,6 +53,8 @@ export class AuthService {
                 phone,
             },
         })
+
+        this.logger.log(`User registered: ${registeredCustomer.id} (${registeredCustomer.email})`);
 
         return {
             message: 'Customer registered successfully',
@@ -69,6 +74,7 @@ export class AuthService {
         });
 
         if (!customer) {
+            this.logger.warn(`Login attempt with invalid email: ${email}`);
             throw new UnauthorizedException('Invalid credentials');
         }
         const now = new Date();
@@ -80,6 +86,7 @@ export class AuthService {
                 where: { id: customer.id },
                 data: { failedLoginAttempts: 0, lockUntil: null },
             });
+            this.logger.log(`Account lock reset after expiry: ${customer.id} (${customer.email})`);
         }
         const threshold = Number(this.config.get(CONFIG_KEYS.LOGIN_LOCK_THRESHOLD)) || 5;
         const durationMinutes = Number(this.config.get(CONFIG_KEYS.LOGIN_LOCK_DURATION_MINUTES)) || 15;
@@ -88,6 +95,7 @@ export class AuthService {
 
         const isPasswordValid = await bcrypt.compare(password, customer.passwordHash);
         if (!isPasswordValid) {
+            this.logger.warn(`Login failed: invalid password for user ${customer.id} (${customer.email})`);
             const rows = await this.prisma.$queryRaw<
                 { failed_login_attempts: number; lock_until: Date | null }[]
             >(
@@ -105,7 +113,15 @@ export class AuthService {
             );
 
             const updated = rows[0];
-            if (!updated) throw new UnauthorizedException('Invalid credentials');
+            if (!updated) {
+                throw new UnauthorizedException('Invalid credentials');
+            }
+
+            if (updated.lock_until) {
+                this.logger.warn(
+                    `Account locked due to failed attempts: ${customer.id} (${customer.email}) until ${updated.lock_until}`,
+                );
+            }
 
             const newAttempts = updated.failed_login_attempts;
 
@@ -119,6 +135,7 @@ export class AuthService {
             where: { id: customer.id },
             data: { failedLoginAttempts: 0, lockUntil: null },
         });
+
 
         const accessPayload: JwtPayload = {
             sub: customer.id
@@ -144,6 +161,7 @@ export class AuthService {
                 expiresAt,
             },
         });
+        this.logger.log(`Login successful: ${customer.id} (${customer.email})`);
 
         const { id, name } = customer;
         const user = { id, email, name };
@@ -163,6 +181,7 @@ export class AuthService {
 
         const rawRefreshToken = req.cookies.refreshToken;
         if (!rawRefreshToken) {
+            this.logger.warn('Refresh failed: refresh token cookie missing');
             throw new UnauthorizedException('Refresh token is required');
         }
 
@@ -180,19 +199,32 @@ export class AuthService {
             },
         });
         if (!refreshTokenRecord) {
+            this.logger.warn('Refresh failed: token hash not found');
             throw new UnauthorizedException('Invalid refresh token');
         }
         if (refreshTokenRecord.revokedAt) {
+            this.logger.warn(
+                `Refresh failed: token revoked for user ${refreshTokenRecord.customerId}`,
+            );
             throw new UnauthorizedException('Refresh token revoked');
         }
         if (refreshTokenRecord.expiresAt < new Date()) {
+            this.logger.warn(
+                `Refresh failed: token expired for user ${refreshTokenRecord.customerId}`,
+            );
             throw new UnauthorizedException('Refresh token expired');
         }
         if (refreshTokenRecord.replacedById) {
+            this.logger.warn(
+                `Refresh failed: token already used (rotated) for user ${refreshTokenRecord.customerId}`,
+            );
             throw new UnauthorizedException('Refresh token already used');
         }
         const customer = refreshTokenRecord.customer;
         if (!customer) {
+            this.logger.warn(
+                `Refresh failed: token record without customer (id: ${refreshTokenRecord.id})`,
+            );
             throw new UnauthorizedException('Invalid refresh token');
         }
 
@@ -222,6 +254,9 @@ export class AuthService {
                 replacedById: newTokenRecord.id,
             },
         });
+
+        this.logger.log(`Refresh token rotated for user ${customer.id} (${customer.email})`);
+
         const accessPayload: JwtPayload = { sub: customer.id };
         const accessToken = await this.jwtService.signAsync(accessPayload);
 
