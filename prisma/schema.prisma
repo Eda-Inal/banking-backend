@@ -50,7 +50,7 @@ enum EventStatus {
 
 
 model Customer {
-  id        String   @id @default(uuid())
+  id        String   @id @default(uuid()) @db.Uuid
   email     String   @unique
   name      String
   phone     String
@@ -69,8 +69,8 @@ model Customer {
 }
 
 model RefreshToken {
-  id           String    @id @default(uuid())
-  customerId   String    @map("customer_id")
+  id           String    @id @default(uuid()) @db.Uuid
+  customerId   String    @map("customer_id") @db.Uuid
   customer     Customer  @relation(fields: [customerId], references: [id])
 
   tokenHash    String    @map("token_hash") @unique
@@ -82,7 +82,7 @@ model RefreshToken {
   createdAt    DateTime  @default(now()) @map("created_at")
   revokedAt    DateTime? @map("revoked_at")
 
-  replacedById String?   @map("replaced_by_id")
+  replacedById String?   @map("replaced_by_id") @db.Uuid
   replacedBy   RefreshToken? @relation("RefreshTokenReplacement", fields: [replacedById], references: [id])
   replacedTokens RefreshToken[] @relation("RefreshTokenReplacement")
 
@@ -92,9 +92,9 @@ model RefreshToken {
 
 
 model Account {
-  id         String   @id @default(uuid())
+  id         String   @id @default(uuid()) @db.Uuid
 
-  customerId String   @map("customer_id")
+  customerId String   @map("customer_id") @db.Uuid
   customer   Customer @relation(fields: [customerId], references: [id])
 
   balance    Decimal  @default(0) @db.Decimal(18,2)
@@ -103,30 +103,35 @@ model Account {
 
   createdAt  DateTime @default(now()) @map("created_at")
 
+  transactionsFrom Transaction[] @relation("FromAccount")
+  transactionsTo   Transaction[] @relation("ToAccount")
+
   @@index([customerId])
   @@map("accounts")
 }
 
 model Transaction {
-  id          String             @id @default(uuid())
-  type        TransactionType   
-  fromAccount String?            @map("from_account")
-  toAccount   String?            @map("to_account")
-  amount      Decimal            @db.Decimal(18,2)
-  status      TransactionStatus  @default(PENDING)
-  referenceId String             @map("reference_id")
-  createdAt   DateTime           @default(now()) @map("created_at")
+  id            String             @id @default(uuid()) @db.Uuid
+  type          TransactionType
+  fromAccountId String?            @map("from_account") @db.Uuid
+  fromAccount   Account?           @relation("FromAccount", fields: [fromAccountId], references: [id], onDelete: SetNull)
+  toAccountId   String?            @map("to_account") @db.Uuid
+  toAccount     Account?           @relation("ToAccount", fields: [toAccountId], references: [id], onDelete: SetNull)
+  amount        Decimal            @db.Decimal(18,2)
+  status        TransactionStatus  @default(PENDING)
+  referenceId   String             @map("reference_id") @unique
+  createdAt     DateTime           @default(now()) @map("created_at")
 
   @@map("transactions")
-  @@index([fromAccount])
-  @@index([toAccount])
+  @@index([fromAccountId])
+  @@index([toAccountId])
 }
 
 model AuditLog {
-  id         String   @id @default(uuid())
+  id         String   @id @default(uuid()) @db.Uuid
   action     Action
 
-  customerId String   @map("customer_id")
+  customerId String   @map("customer_id") @db.Uuid
   user       Customer @relation(fields: [customerId], references: [id])
 
   entityType String   @map("entity_type")
