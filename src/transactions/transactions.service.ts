@@ -6,6 +6,7 @@ import { transactionMapper } from './transactions.mapper';
 import { TransactionType, TransactionStatus, AccountStatus, Action, EventType, EventStatus } from '../common/enums';
 import { Prisma } from '../generated/prisma/client';
 import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
+import { CreateTransferRequestDto } from './dto/create-transfer-request';
 
 @Injectable()
 export class TransactionsService {
@@ -212,5 +213,126 @@ export class TransactionsService {
             }
             throw err;
         }
+    }
+
+    async createTransfer(userId: string, createTransferRequestDto: CreateTransferRequestDto): Promise<TransactionResponseDto> {
+
+        const { amount, referenceId, toAccountId, fromAccountId } = createTransferRequestDto;
+
+
+        const existing = await this.prisma.transaction.findUnique({
+            where: { referenceId }
+        })
+        if (existing && existing.status === TransactionStatus.COMPLETED) {
+            this.logger.log(`Transfer idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
+            return transactionMapper.toResponseDto(existing);
+        }
+        try {
+
+            const result = await this.prisma.$transaction(async (tx) => {
+
+                const [fromAccount, toAccount] = await Promise.all([
+                    tx.account.findUnique({ where: { id: fromAccountId } }),
+                    tx.account.findUnique({ where: { id: toAccountId } }),
+                ]);
+                if (!fromAccount) {
+                    this.logger.warn(`Transfer: account not found fromAccountId=${fromAccountId}, user=${userId}`);
+                    throw new NotFoundException('Account not found');
+                }
+                if (!toAccount) {
+                    this.logger.warn(`Transfer: account not found toAccountId=${toAccountId}, user=${userId}`);
+                    throw new NotFoundException('Account not found');
+                }
+
+                if (fromAccountId === toAccountId) {
+                    this.logger.warn(`Transfer: same-account transfer attempted fromAccountId=${fromAccountId}, user=${userId}`);
+                    throw new BadRequestException('Cannot transfer to the same account');
+                }
+
+                if (fromAccount.customerId !== userId) {
+                    this.logger.warn(`Transfer: forbidden, fromAccountId=${fromAccountId} not owned by user=${userId}`);
+                    throw new ForbiddenException('Account not found');
+                }
+
+                if (fromAccount.status !== AccountStatus.ACTIVE) {
+                    this.logger.warn(`Transfer: from account not active fromAccountId=${fromAccountId}, status=${fromAccount.status}, user=${userId}`);
+                    throw new BadRequestException('From account is not active');
+                }
+
+                if (Number(fromAccount.balance) < amount) {
+                    this.logger.warn(`Transfer: insufficient funds, balance=${fromAccount.balance}, amount=${amount}`);
+                    throw new BadRequestException('Insufficient balance');
+                }
+                const transaction = await tx.transaction.create({
+                    data: {
+                        type: TransactionType.TRANSFER,
+                        fromAccountId,
+                        toAccountId,
+                        amount,
+                        referenceId,
+                        status: TransactionStatus.PENDING,
+                    },
+                });
+
+                await tx.account.update({
+                    where: { id: fromAccountId },
+                    data: {
+                        balance: { decrement: amount },
+                    },
+                });
+                await tx.account.update({
+                    where: { id: toAccountId },
+                    data: {
+                        balance: { increment: amount },
+                    },
+                });
+                const completedTransaction = await tx.transaction.update({
+                    where: { id: transaction.id },
+                    data: {
+                        status: TransactionStatus.COMPLETED,
+                    },
+                });
+                await tx.event.create({
+                    data: {
+                        type: EventType.TRANSACTION_COMPLETED,
+                        payload: {
+                            transactionId: transaction.id,
+                            type: TransactionType.TRANSFER,
+                            status: TransactionStatus.COMPLETED,
+                            fromAccountId,
+                            toAccountId,
+                            amount,
+                            referenceId,
+                            createdAt: transaction.createdAt,
+                        },
+                        status: EventStatus.PENDING,
+                    },
+                });
+                await tx.auditLog.create({
+                    data: {
+                        action: Action.TRANSFER,
+                        customerId: userId,
+                        entityType: 'TRANSACTION',
+                        entityId: transaction.id,
+                    },
+                });
+                return transactionMapper.toResponseDto(completedTransaction);
+            });
+            this.logger.log(`Transfer completed: txId=${result.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`);
+            return result;
+        }
+        catch (err) {
+            const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+            if (isP2002) {
+                const byRef = await this.prisma.transaction.findUnique({ where: { referenceId } });
+                if (byRef) {
+                    this.logger.log(`Transfer P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
+                    return transactionMapper.toResponseDto(byRef);
+                }
+            }
+            throw err;
+        }
+
+
     }
 }

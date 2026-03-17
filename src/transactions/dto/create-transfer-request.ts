@@ -1,6 +1,6 @@
 import { IsNotEmpty, IsNumber, IsString, IsUUID, Min } from 'class-validator';
 
-export class CreateDepositRequestDto {
+export class CreateTransferRequestDto {
     @IsNotEmpty()
     @IsNumber()
     @Min(0.01)
@@ -13,4 +13,8 @@ export class CreateDepositRequestDto {
     @IsNotEmpty()
     @IsUUID()
     toAccountId: string;
+
+    @IsNotEmpty()
+    @IsUUID()
+    fromAccountId: string;
 }

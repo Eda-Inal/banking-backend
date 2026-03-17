@@ -6,6 +6,7 @@ import type { CurrentUserPayload } from '../common/decorators/current-user.decor
 import { CreateDepositRequestDto } from './dto/create-deposit-request';
 import { TransactionResponseDto } from './dto/transaction-response.dto';
 import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
+import { CreateTransferRequestDto } from './dto/create-transfer-request';
 
 @Controller('transactions')
 @UseGuards(JwtGuard)
@@ -21,5 +22,10 @@ export class TransactionsController {
   @Post('withdraw')
   async createWithdraw(@CurrentUser() user: CurrentUserPayload, @Body() createWithdrawRequestDto: CreateWithdrawRequestDto): Promise<TransactionResponseDto> {
     return this.transactionsService.createWithdraw(user.userId, createWithdrawRequestDto);
+  }
+
+  @Post('transfer')
+  async createTransfer(@CurrentUser() user: CurrentUserPayload, @Body() createTransferRequestDto: CreateTransferRequestDto): Promise<TransactionResponseDto> {
+    return this.transactionsService.createTransfer(user.userId, createTransferRequestDto);
   }
 }
