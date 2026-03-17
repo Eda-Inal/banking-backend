@@ -1,4 +1,112 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateDepositRequestDto } from './dto/create-deposit-request';
+import { TransactionResponseDto } from './dto/transaction-response.dto';
+import { transactionMapper } from './transactions.mapper';
+import { TransactionType, TransactionStatus, AccountStatus, Action, EventType, EventStatus } from '../common/enums';
+import { Prisma } from '../generated/prisma/client';
 
 @Injectable()
-export class TransactionsService {}
+export class TransactionsService {
+    private readonly logger = new Logger(TransactionsService.name);
+
+    constructor(private readonly prisma: PrismaService) { }
+
+    async createDeposit(userId: string, createDepositRequestDto: CreateDepositRequestDto): Promise<TransactionResponseDto> {
+        const { amount, referenceId, toAccountId } = createDepositRequestDto;
+
+        const existing = await this.prisma.transaction.findUnique({
+            where: { referenceId }
+        })
+        if (existing && existing.status === TransactionStatus.COMPLETED) {
+            this.logger.log(`Deposit idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
+            return transactionMapper.toResponseDto(existing);
+        }
+
+        try {
+            const result = await this.prisma.$transaction(async (tx) => {
+
+            const account = await tx.account.findUnique({
+                where: { id: toAccountId }
+            });
+            if (!account) {
+                this.logger.warn(`Deposit: account not found toAccountId=${toAccountId}, user=${userId}`);
+                throw new NotFoundException('Account not found');
+            }
+            if (account.customerId !== userId) {
+                this.logger.warn(`Deposit: forbidden, toAccountId=${toAccountId} not owned by user=${userId}`);
+                throw new ForbiddenException('Account not found');
+            }
+            if (account.status !== AccountStatus.ACTIVE) {
+                this.logger.warn(`Deposit: account not active toAccountId=${toAccountId}, status=${account.status}, user=${userId}`);
+                throw new BadRequestException('Account is not active');
+            }
+
+
+            const transaction = await tx.transaction.create({
+                data: {
+                    type: TransactionType.DEPOSIT,
+                    fromAccountId: null,
+                    toAccountId,
+                    amount,
+                    referenceId,
+                    status: TransactionStatus.PENDING,
+                },
+            });
+
+            await tx.account.update({
+                where: { id: toAccountId },
+                data: {
+                    balance: { increment: amount },
+                },
+            });
+
+            const completedTransaction = await tx.transaction.update({
+                where: { id: transaction.id },
+                data: {
+                    status: TransactionStatus.COMPLETED,
+                },
+            });
+
+            await tx.event.create({
+                data: {
+                    type: EventType.TRANSACTION_COMPLETED,
+                    payload: {
+                        transactionId: transaction.id,
+                        type: TransactionType.DEPOSIT,
+                        status: TransactionStatus.COMPLETED,
+                        toAccountId,
+                        amount,
+                        referenceId,
+                        createdAt: transaction.createdAt,
+                    },
+                    status: EventStatus.PENDING,
+                },
+            });
+
+            await tx.auditLog.create({
+                data: {
+                    action: Action.DEPOSIT,
+                    customerId: userId,
+                    entityType: 'TRANSACTION',
+                    entityId: transaction.id,
+                },
+            });
+
+            return transactionMapper.toResponseDto(completedTransaction);
+            });
+            this.logger.log(`Deposit completed: transactionId=${result.id}, toAccountId=${toAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`);
+            return result;
+        } catch (err) {
+            const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+            if (isP2002) {
+                const byRef = await this.prisma.transaction.findUnique({ where: { referenceId } });
+                if (byRef) {
+                    this.logger.log(`Deposit P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
+                    return transactionMapper.toResponseDto(byRef);
+                }
+            }
+            throw err;
+        }
+    }
+}
