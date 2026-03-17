@@ -5,6 +5,7 @@ import { TransactionResponseDto } from './dto/transaction-response.dto';
 import { transactionMapper } from './transactions.mapper';
 import { TransactionType, TransactionStatus, AccountStatus, Action, EventType, EventStatus } from '../common/enums';
 import { Prisma } from '../generated/prisma/client';
+import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
 
 @Injectable()
 export class TransactionsService {
@@ -26,74 +27,74 @@ export class TransactionsService {
         try {
             const result = await this.prisma.$transaction(async (tx) => {
 
-            const account = await tx.account.findUnique({
-                where: { id: toAccountId }
-            });
-            if (!account) {
-                this.logger.warn(`Deposit: account not found toAccountId=${toAccountId}, user=${userId}`);
-                throw new NotFoundException('Account not found');
-            }
-            if (account.customerId !== userId) {
-                this.logger.warn(`Deposit: forbidden, toAccountId=${toAccountId} not owned by user=${userId}`);
-                throw new ForbiddenException('Account not found');
-            }
-            if (account.status !== AccountStatus.ACTIVE) {
-                this.logger.warn(`Deposit: account not active toAccountId=${toAccountId}, status=${account.status}, user=${userId}`);
-                throw new BadRequestException('Account is not active');
-            }
+                const account = await tx.account.findUnique({
+                    where: { id: toAccountId }
+                });
+                if (!account) {
+                    this.logger.warn(`Deposit: account not found toAccountId=${toAccountId}, user=${userId}`);
+                    throw new NotFoundException('Account not found');
+                }
+                if (account.customerId !== userId) {
+                    this.logger.warn(`Deposit: forbidden, toAccountId=${toAccountId} not owned by user=${userId}`);
+                    throw new ForbiddenException('Account not found');
+                }
+                if (account.status !== AccountStatus.ACTIVE) {
+                    this.logger.warn(`Deposit: account not active toAccountId=${toAccountId}, status=${account.status}, user=${userId}`);
+                    throw new BadRequestException('Account is not active');
+                }
 
 
-            const transaction = await tx.transaction.create({
-                data: {
-                    type: TransactionType.DEPOSIT,
-                    fromAccountId: null,
-                    toAccountId,
-                    amount,
-                    referenceId,
-                    status: TransactionStatus.PENDING,
-                },
-            });
-
-            await tx.account.update({
-                where: { id: toAccountId },
-                data: {
-                    balance: { increment: amount },
-                },
-            });
-
-            const completedTransaction = await tx.transaction.update({
-                where: { id: transaction.id },
-                data: {
-                    status: TransactionStatus.COMPLETED,
-                },
-            });
-
-            await tx.event.create({
-                data: {
-                    type: EventType.TRANSACTION_COMPLETED,
-                    payload: {
-                        transactionId: transaction.id,
+                const transaction = await tx.transaction.create({
+                    data: {
                         type: TransactionType.DEPOSIT,
-                        status: TransactionStatus.COMPLETED,
+                        fromAccountId: null,
                         toAccountId,
                         amount,
                         referenceId,
-                        createdAt: transaction.createdAt,
+                        status: TransactionStatus.PENDING,
                     },
-                    status: EventStatus.PENDING,
-                },
-            });
+                });
 
-            await tx.auditLog.create({
-                data: {
-                    action: Action.DEPOSIT,
-                    customerId: userId,
-                    entityType: 'TRANSACTION',
-                    entityId: transaction.id,
-                },
-            });
+                await tx.account.update({
+                    where: { id: toAccountId },
+                    data: {
+                        balance: { increment: amount },
+                    },
+                });
 
-            return transactionMapper.toResponseDto(completedTransaction);
+                const completedTransaction = await tx.transaction.update({
+                    where: { id: transaction.id },
+                    data: {
+                        status: TransactionStatus.COMPLETED,
+                    },
+                });
+
+                await tx.event.create({
+                    data: {
+                        type: EventType.TRANSACTION_COMPLETED,
+                        payload: {
+                            transactionId: transaction.id,
+                            type: TransactionType.DEPOSIT,
+                            status: TransactionStatus.COMPLETED,
+                            toAccountId,
+                            amount,
+                            referenceId,
+                            createdAt: transaction.createdAt,
+                        },
+                        status: EventStatus.PENDING,
+                    },
+                });
+
+                await tx.auditLog.create({
+                    data: {
+                        action: Action.DEPOSIT,
+                        customerId: userId,
+                        entityType: 'TRANSACTION',
+                        entityId: transaction.id,
+                    },
+                });
+
+                return transactionMapper.toResponseDto(completedTransaction);
             });
             this.logger.log(`Deposit completed: transactionId=${result.id}, toAccountId=${toAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`);
             return result;
@@ -103,6 +104,109 @@ export class TransactionsService {
                 const byRef = await this.prisma.transaction.findUnique({ where: { referenceId } });
                 if (byRef) {
                     this.logger.log(`Deposit P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
+                    return transactionMapper.toResponseDto(byRef);
+                }
+            }
+            throw err;
+        }
+    }
+
+    async createWithdraw(userId: string, createWithdrawRequestDto: CreateWithdrawRequestDto): Promise<TransactionResponseDto> {
+        const { amount, referenceId, fromAccountId } = createWithdrawRequestDto;
+
+        const existing = await this.prisma.transaction.findUnique({
+            where: { referenceId }
+        })
+        if (existing && existing.status === TransactionStatus.COMPLETED) {
+            this.logger.log(`Withdraw idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
+            return transactionMapper.toResponseDto(existing);
+        }
+        try {
+
+            const result = await this.prisma.$transaction(async (tx) => {
+                const account = await tx.account.findUnique({
+                    where: { id: fromAccountId }
+                });
+                if (!account) {
+                    this.logger.warn(`Withdraw: account not found fromAccountId=${fromAccountId}, user=${userId}`);
+                    throw new NotFoundException('Account not found');
+                }
+                if (account.customerId !== userId) {
+                    this.logger.warn(`Withdraw: forbidden, fromAccountId=${fromAccountId} not owned by user=${userId}`);
+                    throw new ForbiddenException('Account not found');
+                }
+                if (account.status !== AccountStatus.ACTIVE) {
+                    this.logger.warn(`Withdraw: account not active fromAccountId=${fromAccountId}, status=${account.status}, user=${userId}`);
+                    throw new BadRequestException('Account is not active');
+                }
+
+                if (Number(account.balance) < amount) {
+                    this.logger.warn(`Withdraw: account balance not enough fromAccountId=${fromAccountId}, balance=${account.balance}, amount=${amount}, user=${userId}`);
+                    throw new BadRequestException('Account balance not enough');
+                }
+                const transaction = await tx.transaction.create({
+                    data: {
+                        type: TransactionType.WITHDRAW,
+                        fromAccountId,
+                        toAccountId: null,
+                        amount,
+                        referenceId,
+                        status: TransactionStatus.PENDING,
+                    },
+                });
+
+                await tx.account.update({
+                    where: { id: fromAccountId },
+                    data: {
+                        balance: { decrement: amount },
+                    },
+                });
+
+                const completedTransaction = await tx.transaction.update({
+                    where: { id: transaction.id },
+                    data: {
+                        status: TransactionStatus.COMPLETED,
+                    },
+                });
+
+                await tx.event.create({
+                    data: {
+                        type: EventType.TRANSACTION_COMPLETED,
+                        payload: {
+                            transactionId: transaction.id,
+                            type: TransactionType.WITHDRAW,
+                            status: TransactionStatus.COMPLETED,
+                            fromAccountId,
+                            amount,
+                            referenceId,
+                            createdAt: transaction.createdAt,
+                        },
+                        status: EventStatus.PENDING,
+                    },
+                });
+                await tx.auditLog.create({
+                    data: {
+                        action: Action.WITHDRAW,
+                        customerId: userId,
+                        entityType: 'TRANSACTION',
+                        entityId: transaction.id,
+                    },
+                });
+                return transactionMapper.toResponseDto(completedTransaction);
+
+
+
+            });
+            this.logger.log(`Withdraw completed: transactionId=${result.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`);
+            return result;
+
+
+        } catch (err) {
+            const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+            if (isP2002) {
+                const byRef = await this.prisma.transaction.findUnique({ where: { referenceId } });
+                if (byRef) {
+                    this.logger.log(`Withdraw P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
                     return transactionMapper.toResponseDto(byRef);
                 }
             }
