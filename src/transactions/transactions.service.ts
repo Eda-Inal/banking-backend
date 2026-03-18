@@ -114,6 +114,7 @@ export class TransactionsService {
 
     async createWithdraw(userId: string, createWithdrawRequestDto: CreateWithdrawRequestDto): Promise<TransactionResponseDto> {
         const { amount, referenceId, fromAccountId } = createWithdrawRequestDto;
+        const amountDecimal = new Prisma.Decimal(amount);
 
         const existing = await this.prisma.transaction.findUnique({
             where: { referenceId }
@@ -141,7 +142,7 @@ export class TransactionsService {
                     throw new BadRequestException('Account is not active');
                 }
 
-                if (Number(account.balance) < amount) {
+                if (account.balance.lt(amountDecimal)) {
                     this.logger.warn(`Withdraw: account balance not enough fromAccountId=${fromAccountId}, balance=${account.balance}, amount=${amount}, user=${userId}`);
                     throw new BadRequestException('Account balance not enough');
                 }
@@ -218,6 +219,7 @@ export class TransactionsService {
     async createTransfer(userId: string, createTransferRequestDto: CreateTransferRequestDto): Promise<TransactionResponseDto> {
 
         const { amount, referenceId, toAccountId, fromAccountId } = createTransferRequestDto;
+        const amountDecimal = new Prisma.Decimal(amount);
 
 
         const existing = await this.prisma.transaction.findUnique({
@@ -259,7 +261,7 @@ export class TransactionsService {
                     throw new BadRequestException('From account is not active');
                 }
 
-                if (Number(fromAccount.balance) < amount) {
+                if (fromAccount.balance.lt(amountDecimal)) {
                     this.logger.warn(`Transfer: insufficient funds, balance=${fromAccount.balance}, amount=${amount}`);
                     throw new BadRequestException('Insufficient balance');
                 }

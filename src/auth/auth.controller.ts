@@ -4,13 +4,23 @@ import { RegisterRequestDto } from './dto/register-request.dto';
 import { RegisterResponseDto } from './dto/register-response.dto';
 import { LoginRequestDto } from './dto/login-request.dto';
 import { LoginResponseDto } from './dto/login-response.dto';
-import type { Response, Request } from 'express';
+import type { Response, Request, CookieOptions } from 'express';
 import { LoginRateLimitGuard } from './guards/login-rate-limit.guard';
 
 @Controller('auth')
 export class AuthController {
 
   constructor(private readonly authService: AuthService) { }
+
+  private getRefreshCookieOptions(): CookieOptions {
+    return {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict' as const,
+      path: '/',
+      maxAge: Number(process.env.JWT_REFRESH_EXPIRES_IN) * 1000,
+    };
+  }
 
   @Post('register')
   async register(@Body() registerRequestDto: RegisterRequestDto): Promise<RegisterResponseDto> {
@@ -25,11 +35,7 @@ export class AuthController {
   ): Promise<LoginResponseDto> {
     const result = await this.authService.login(loginRequestDto);
 
-    res.cookie('refreshToken', result.refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: Number(process.env.JWT_REFRESH_EXPIRES_IN) * 1000,
-    });
+    res.cookie('refreshToken', result.refreshToken, this.getRefreshCookieOptions());
 
     const { refreshToken, ...loginResponse } = result;
     return loginResponse;
@@ -41,11 +47,7 @@ export class AuthController {
   ): Promise<LoginResponseDto> {
     const result = await this.authService.refresh(req);
 
-    res.cookie('refreshToken', result.refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: Number(process.env.JWT_REFRESH_EXPIRES_IN) * 1000,
-    });
+    res.cookie('refreshToken', result.refreshToken, this.getRefreshCookieOptions());
 
     const { refreshToken, ...loginResponse } = result;
     return loginResponse;
@@ -58,12 +60,7 @@ export class AuthController {
   ): Promise<{ message: string }> {
     const result = await this.authService.logout(req);
 
-    res.clearCookie('refreshToken', {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      path: '/',
-    });
+    res.clearCookie('refreshToken', this.getRefreshCookieOptions());
 
     return result;
   }
