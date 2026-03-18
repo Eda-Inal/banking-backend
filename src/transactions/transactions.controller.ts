@@ -1,4 +1,4 @@
-import { Controller, UseGuards, Post, Body } from '@nestjs/common';
+import { Controller, UseGuards, Post, Body, Req } from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
 import { JwtGuard } from '../auth/jwt.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -7,25 +7,93 @@ import { CreateDepositRequestDto } from './dto/create-deposit-request';
 import { TransactionResponseDto } from './dto/transaction-response.dto';
 import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
 import { CreateTransferRequestDto } from './dto/create-transfer-request';
+import { RedisService } from '../redis/redis.service';
+import { TransferRateLimitGuard } from './guards/transfer-rate-limit.guard';
+import {
+  TransactionsIdempotencyGuard,
+  type IdempotencyRequest,
+} from './guards/transactions-idempotency.guard';
 
 @Controller('transactions')
 @UseGuards(JwtGuard)
 export class TransactionsController {
-  constructor(private readonly transactionsService: TransactionsService) { }
+  constructor(
+    private readonly transactionsService: TransactionsService,
+    private readonly redis: RedisService,
+  ) {}
 
   @Post('deposit')
-  async createDeposit(@CurrentUser() user: CurrentUserPayload, @Body() createDepositRequestDto: CreateDepositRequestDto): Promise<TransactionResponseDto> {
-
-    return this.transactionsService.createDeposit(user.userId, createDepositRequestDto);
+  @UseGuards(TransactionsIdempotencyGuard)
+  async createDeposit(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() createDepositRequestDto: CreateDepositRequestDto,
+    @Req() req: IdempotencyRequest,
+  ): Promise<TransactionResponseDto> {
+    const key = req.idempotencyKey;
+    try {
+      const result = await this.transactionsService.createDeposit(
+        user.userId,
+        createDepositRequestDto,
+      );
+      if (key) {
+        await this.redis.getClient().set(key, 'done', 'EX', 60 * 5);
+      }
+      return result;
+    } catch (err) {
+      if (key) {
+        await this.redis.getClient().del(key);
+      }
+      throw err;
+    }
   }
 
   @Post('withdraw')
-  async createWithdraw(@CurrentUser() user: CurrentUserPayload, @Body() createWithdrawRequestDto: CreateWithdrawRequestDto): Promise<TransactionResponseDto> {
-    return this.transactionsService.createWithdraw(user.userId, createWithdrawRequestDto);
+  @UseGuards(TransferRateLimitGuard, TransactionsIdempotencyGuard)
+  async createWithdraw(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() createWithdrawRequestDto: CreateWithdrawRequestDto,
+    @Req() req: IdempotencyRequest,
+  ): Promise<TransactionResponseDto> {
+    const key = req.idempotencyKey;
+    try {
+      const result = await this.transactionsService.createWithdraw(
+        user.userId,
+        createWithdrawRequestDto,
+      );
+      if (key) {
+        await this.redis.getClient().set(key, 'done', 'EX', 60 * 5);
+      }
+      return result;
+    } catch (err) {
+      if (key) {
+        await this.redis.getClient().del(key);
+      }
+      throw err;
+    }
   }
 
   @Post('transfer')
-  async createTransfer(@CurrentUser() user: CurrentUserPayload, @Body() createTransferRequestDto: CreateTransferRequestDto): Promise<TransactionResponseDto> {
-    return this.transactionsService.createTransfer(user.userId, createTransferRequestDto);
+  @UseGuards(TransferRateLimitGuard, TransactionsIdempotencyGuard)
+  async createTransfer(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() createTransferRequestDto: CreateTransferRequestDto,
+    @Req() req: IdempotencyRequest,
+  ): Promise<TransactionResponseDto> {
+    const key = req.idempotencyKey;
+    try {
+      const result = await this.transactionsService.createTransfer(
+        user.userId,
+        createTransferRequestDto,
+      );
+      if (key) {
+        await this.redis.getClient().set(key, 'done', 'EX', 60 * 5);
+      }
+      return result;
+    } catch (err) {
+      if (key) {
+        await this.redis.getClient().del(key);
+      }
+      throw err;
+    }
   }
 }
