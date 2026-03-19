@@ -15,11 +15,19 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     if (exception instanceof HttpException) {
       status = exception.getStatus();
       const res = exception.getResponse();
-      const message = (res as any).message;
-      if (Array.isArray(message)) {
-        error = message.join(', ');
+      if (typeof res === 'string') {
+        error = res;
+      } else if (res && typeof res === 'object') {
+        const message = (res as any).message;
+        if (Array.isArray(message)) {
+          error = message.join(', ');
+        } else if (typeof message === 'string' && message.trim()) {
+          error = message;
+        } else {
+          error = exception.message || error;
+        }
       } else {
-        error = message;
+        error = exception.message || error;
       }
     }
 

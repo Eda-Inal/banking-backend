@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   CanActivate,
+  ConflictException,
   ExecutionContext,
   HttpException,
   HttpStatus,
@@ -68,7 +69,7 @@ export class TransactionsIdempotencyGuard implements CanActivate {
       );
 
       if (ok !== 'OK') {
-        throw new HttpException('Duplicate request', HttpStatus.CONFLICT);
+        throw new ConflictException('Duplicate request');
       }
 
       request.idempotencyKey = key;
