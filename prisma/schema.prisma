@@ -40,6 +40,13 @@ enum Action {
   TRANSFER
   LOGIN
   LOGOUT
+  ACCOUNT_CREATE
+  ACCOUNT_FREEZE
+  ACCOUNT_UNFREEZE
+  ACCOUNT_CLOSE
+  PASSWORD_CHANGE
+  REGISTER
+  REFRESH
 }
 
 enum EventStatus {
@@ -136,6 +143,9 @@ model AuditLog {
 
   entityType String   @map("entity_type")
   entityId   String   @map("entity_id") @db.Uuid
+
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
 
   timestamp  DateTime @default(now())
 

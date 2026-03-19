@@ -4,6 +4,8 @@ import { AccountResponseDto } from './dto/account-response.dto';
 import { accountMapper } from './accounts.mapper';
 import { CreateAccountRequestDto } from './dto/create-account-request.dto';
 import { AccountStatus } from '../common/enums';
+import { RequestContext } from '../common/request-context/request-context';
+import { Action as PrismaAction } from '../generated/prisma/enums';
 
 
 
@@ -39,6 +41,7 @@ export class AccountsService {
 
     async createAccount(userId: string, createAccountRequestDto: CreateAccountRequestDto): Promise<AccountResponseDto> {
         const { currency } = createAccountRequestDto;
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         const accountExists = await this.prisma.account.findFirst({
             where: {
@@ -55,11 +58,22 @@ export class AccountsService {
         const account = await this.prisma.account.create({
             data: { customerId: userId, currency },
         });
+        await this.prisma.auditLog.create({
+            data: {
+                action: PrismaAction.ACCOUNT_CREATE,
+                customerId: userId,
+                entityType: 'ACCOUNT',
+                entityId: account.id,
+                ipAddress: clientIpMasked,
+                userAgent,
+            },
+        });
         this.logger.log(`Account created: ${account.id} for user ${userId}`);
         return accountMapper.toResponseDto(account);
     }
 
     async freezeAccount(userId: string, id: string): Promise<AccountResponseDto> {
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         let account = await this.prisma.account.findFirst({
             where: { id, customerId: userId },
@@ -81,11 +95,22 @@ export class AccountsService {
             where: { id, customerId: userId },
             data: { status: AccountStatus.FROZEN },
         });
+        await this.prisma.auditLog.create({
+            data: {
+                action: PrismaAction.ACCOUNT_FREEZE,
+                customerId: userId,
+                entityType: 'ACCOUNT',
+                entityId: account.id,
+                ipAddress: clientIpMasked,
+                userAgent,
+            },
+        });
         this.logger.log(`Account frozen: ${id} for user ${userId}`);
         return accountMapper.toResponseDto(account);
     }
 
     async unfreezeAccount(userId: string, id: string): Promise<AccountResponseDto> {
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         let account = await this.prisma.account.findFirst({
             where: { id, customerId: userId },
@@ -106,11 +131,22 @@ export class AccountsService {
             where: { id, customerId: userId },
             data: { status: AccountStatus.ACTIVE },
         });
+        await this.prisma.auditLog.create({
+            data: {
+                action: PrismaAction.ACCOUNT_UNFREEZE,
+                customerId: userId,
+                entityType: 'ACCOUNT',
+                entityId: account.id,
+                ipAddress: clientIpMasked,
+                userAgent,
+            },
+        });
         this.logger.log(`Account unfrozen: ${id} for user ${userId}`);
         return accountMapper.toResponseDto(account);
     }
 
     async closeAccount(userId: string, id: string): Promise<AccountResponseDto> {
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         let account = await this.prisma.account.findFirst({
             where: { id, customerId: userId },
@@ -126,6 +162,16 @@ export class AccountsService {
         account = await this.prisma.account.update({
             where: { id, customerId: userId },
             data: { status: AccountStatus.CLOSED },
+        });
+        await this.prisma.auditLog.create({
+            data: {
+                action: PrismaAction.ACCOUNT_CLOSE,
+                customerId: userId,
+                entityType: 'ACCOUNT',
+                entityId: account.id,
+                ipAddress: clientIpMasked,
+                userAgent,
+            },
         });
         this.logger.log(`Account closed: ${id} for user ${userId}`);
         return accountMapper.toResponseDto(account);

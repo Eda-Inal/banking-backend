@@ -6,6 +6,8 @@ import { UpdateUserMeRequestDto } from './dto/update-user-me-request.dto';
 import { UpdatePasswordRequestDto } from './dto/update-password-request.dto';
 import { UpdatePasswordResponseDto } from './dto/update-password-response.dto';
 import * as bcrypt from 'bcrypt';
+import { RequestContext } from '../common/request-context/request-context';
+import { Action as PrismaAction } from '../generated/prisma/enums';
 
 
 @Injectable()
@@ -75,6 +77,7 @@ export class UsersService {
 
     async patchPassword(userId: string, updatePasswordRequestDto: UpdatePasswordRequestDto): Promise<UpdatePasswordResponseDto> {
         const { oldPassword, newPassword } = updatePasswordRequestDto;
+        const { clientIpMasked, userAgent } = RequestContext.get();
         const user = await this.prisma.customer.findUnique({
             where: { id: userId },
         });
@@ -97,6 +100,16 @@ export class UsersService {
         await this.prisma.customer.update({
             where: { id: userId },
             data: { passwordHash: hashedNewPassword },
+        });
+        await this.prisma.auditLog.create({
+            data: {
+                action: PrismaAction.PASSWORD_CHANGE,
+                customerId: userId,
+                entityType: 'CUSTOMER',
+                entityId: userId,
+                ipAddress: clientIpMasked,
+                userAgent,
+            },
         });
         this.logger.log(`Password changed for user ${user.id} (${user.email})`);
         return {

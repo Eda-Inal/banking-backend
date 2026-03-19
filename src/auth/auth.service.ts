@@ -14,6 +14,8 @@ import { JwtPayload } from './jwt-payload.interface';
 import * as crypto from 'crypto';
 import { AccountLockedException } from './exceptions/account-locked.exception';
 import { Prisma } from '../generated/prisma/client';
+import { Action as PrismaAction } from '../generated/prisma/enums';
+import { RequestContext } from '../common/request-context/request-context';
 
 interface LoginWithRefresh extends LoginResponseDto {
     refreshToken: string;
@@ -31,6 +33,7 @@ export class AuthService {
     async register(registerRequestDto: RegisterRequestDto): Promise<RegisterResponseDto> {
 
         const { email, password, name, phone } = registerRequestDto;
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         const customer = await this.prisma.customer.findUnique({
             where: {
@@ -53,6 +56,16 @@ export class AuthService {
                 phone,
             },
         })
+        await this.prisma.auditLog.create({
+            data: {
+                action: PrismaAction.REGISTER,
+                customerId: registeredCustomer.id,
+                entityType: 'CUSTOMER',
+                entityId: registeredCustomer.id,
+                ipAddress: clientIpMasked,
+                userAgent,
+            },
+        });
 
         this.logger.log(`User registered: ${registeredCustomer.id} (${registeredCustomer.email})`);
 
@@ -66,6 +79,7 @@ export class AuthService {
     async login(loginRequestDto: LoginRequestDto): Promise<LoginWithRefresh> {
 
         const { email, password } = loginRequestDto;
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         let customer = await this.prisma.customer.findUnique({
             where: {
@@ -75,6 +89,7 @@ export class AuthService {
 
         if (!customer) {
             this.logger.warn(`Login attempt with invalid email: ${email}`);
+         
             throw new UnauthorizedException('Invalid credentials');
         }
         const now = new Date();
@@ -127,6 +142,16 @@ export class AuthService {
 
             const delaySeconds = Math.min(delayCapSeconds, Math.pow(2, newAttempts));
             await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+            await this.prisma.auditLog.create({
+                data: {
+                    action: PrismaAction.LOGIN,
+                    customerId: customer.id,
+                    entityType: 'CUSTOMER',
+                    entityId: customer.id,
+                    ipAddress: clientIpMasked,
+                    userAgent,
+                },
+            });
 
             throw new UnauthorizedException('Invalid credentials');
         }
@@ -159,6 +184,18 @@ export class AuthService {
                 customerId: customer.id,
                 tokenHash: refreshTokenHash,
                 expiresAt,
+                ipAddress: clientIpMasked,
+                userAgent,
+            },
+        });
+        await this.prisma.auditLog.create({
+            data: {
+                action: PrismaAction.LOGIN,
+                customerId: customer.id,
+                entityType: 'CUSTOMER',
+                entityId: customer.id,
+                ipAddress: clientIpMasked,
+                userAgent,
             },
         });
         this.logger.log(`Login successful: ${customer.id} (${customer.email})`);
@@ -178,6 +215,7 @@ export class AuthService {
     }
 
     async refresh(req: Request): Promise<RefreshResult> {
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         const rawRefreshToken = req.cookies.refreshToken;
         if (!rawRefreshToken) {
@@ -244,6 +282,8 @@ export class AuthService {
                 customerId: customer.id,
                 tokenHash: newTokenHash,
                 expiresAt: newExpiresAt,
+                ipAddress: clientIpMasked,
+                userAgent,
             },
         });
 
@@ -256,6 +296,16 @@ export class AuthService {
         });
 
         this.logger.log(`Refresh token rotated for user ${customer.id} (${customer.email})`);
+        await this.prisma.auditLog.create({
+            data: {
+                action: PrismaAction.REFRESH,
+                customerId: customer.id,
+                entityType: 'CUSTOMER',
+                entityId: customer.id,
+                ipAddress: clientIpMasked,
+                userAgent,
+            },
+        });
 
         const accessPayload: JwtPayload = { sub: customer.id };
         const accessToken = await this.jwtService.signAsync(accessPayload);
@@ -276,6 +326,7 @@ export class AuthService {
     }
 
     async logout(req: Request): Promise<{ message: string }> {
+        const { clientIpMasked, userAgent } = RequestContext.get();
         const rawRefreshToken = req.cookies?.refreshToken;
         if (!rawRefreshToken) {
             return { message: 'Logged out' };
@@ -293,6 +344,16 @@ export class AuthService {
             await this.prisma.refreshToken.update({
                 where: { id: refreshTokenRecord.id },
                 data: { revokedAt: new Date() },
+            });
+            await this.prisma.auditLog.create({
+                data: {
+                    action: PrismaAction.LOGOUT,
+                    customerId: refreshTokenRecord.customerId,
+                    entityType: 'CUSTOMER',
+                    entityId: refreshTokenRecord.customerId,
+                    ipAddress: clientIpMasked,
+                    userAgent,
+                },
             });
         }
 

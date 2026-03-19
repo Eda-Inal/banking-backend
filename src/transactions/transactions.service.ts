@@ -7,6 +7,7 @@ import { TransactionType, TransactionStatus, AccountStatus, Action, EventType, E
 import { Prisma } from '../generated/prisma/client';
 import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
 import { CreateTransferRequestDto } from './dto/create-transfer-request';
+import { RequestContext } from '../common/request-context/request-context';
 
 @Injectable()
 export class TransactionsService {
@@ -16,6 +17,7 @@ export class TransactionsService {
 
     async createDeposit(userId: string, createDepositRequestDto: CreateDepositRequestDto): Promise<TransactionResponseDto> {
         const { amount, referenceId, toAccountId } = createDepositRequestDto;
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         const existing = await this.prisma.transaction.findUnique({
             where: { referenceId }
@@ -92,6 +94,8 @@ export class TransactionsService {
                         customerId: userId,
                         entityType: 'TRANSACTION',
                         entityId: transaction.id,
+                        ipAddress: clientIpMasked,
+                        userAgent,
                     },
                 });
 
@@ -115,6 +119,7 @@ export class TransactionsService {
     async createWithdraw(userId: string, createWithdrawRequestDto: CreateWithdrawRequestDto): Promise<TransactionResponseDto> {
         const { amount, referenceId, fromAccountId } = createWithdrawRequestDto;
         const amountDecimal = new Prisma.Decimal(amount);
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
         const existing = await this.prisma.transaction.findUnique({
             where: { referenceId }
@@ -192,6 +197,8 @@ export class TransactionsService {
                         customerId: userId,
                         entityType: 'TRANSACTION',
                         entityId: transaction.id,
+                        ipAddress: clientIpMasked,
+                        userAgent,
                     },
                 });
                 return transactionMapper.toResponseDto(completedTransaction);
@@ -220,6 +227,7 @@ export class TransactionsService {
 
         const { amount, referenceId, toAccountId, fromAccountId } = createTransferRequestDto;
         const amountDecimal = new Prisma.Decimal(amount);
+        const { clientIpMasked, userAgent } = RequestContext.get();
 
 
         const existing = await this.prisma.transaction.findUnique({
@@ -316,6 +324,8 @@ export class TransactionsService {
                         customerId: userId,
                         entityType: 'TRANSACTION',
                         entityId: transaction.id,
+                        ipAddress: clientIpMasked,
+                        userAgent,
                     },
                 });
                 return transactionMapper.toResponseDto(completedTransaction);
