@@ -158,7 +158,26 @@ model Event {
   type      String
   payload   Json
   status    EventStatus @default(PENDING)
+  retryCount   Int       @default(0) @map("retry_count")
+  nextRetryAt  DateTime? @map("next_retry_at")
+  lastError    String?   @map("last_error")
+  publishedAt  DateTime? @map("published_at")
+
   createdAt DateTime    @default(now()) @map("created_at")
 
   @@map("events")
+  @@index([status, createdAt])
+  @@index([status, nextRetryAt])
+}
+
+model ProcessedMessage {
+  id         String   @id @default(uuid()) @db.Uuid
+  messageId  String   @map("message_id")
+  eventType  String   @map("event_type")
+  consumer   String
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@map("processed_messages")
+  @@unique([consumer, messageId])
+  @@index([processedAt])
 }

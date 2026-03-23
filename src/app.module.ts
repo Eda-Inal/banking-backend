@@ -9,6 +9,8 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { AccountsModule } from './accounts/accounts.module';
 import { TransactionsModule } from './transactions/transactions.module';
+import { RabbitMqModule } from './messaging/rabbitmq.module';
+import { OutboxModule } from './outbox/outbox.module';
 
 @Module({
   imports: [
@@ -22,6 +24,8 @@ import { TransactionsModule } from './transactions/transactions.module';
     UsersModule,
     AccountsModule,
     TransactionsModule,
+    RabbitMqModule,
+    OutboxModule,
   ],
   controllers: [AppController],
   providers: [AppService],

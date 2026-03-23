@@ -10,6 +10,16 @@ export class SuccessResponseInterceptor implements NestInterceptor {
     const { method, url, traceId } = request;
     const startedAt = Date.now();
 
+    if (url === '/metrics' || url.startsWith('/metrics?')) {
+      return next.handle().pipe(
+        tap(() => {
+          const durationMs = Date.now() - startedAt;
+          const trace = traceId ?? 'no-trace-id';
+          this.logger.log(`[${trace}] ${method} ${url} -> 200 (${durationMs}ms)`);
+        }),
+      );
+    }
+
     return next.handle().pipe(
       tap(() => {
         const durationMs = Date.now() - startedAt;
