@@ -55,6 +55,11 @@ enum EventStatus {
   FAILED
 }
 
+enum FraudDecision {
+  APPROVE
+  REJECT
+}
+
 
 model Customer {
   id        String   @id @default(uuid()) @db.Uuid
@@ -126,6 +131,8 @@ model Transaction {
   toAccount     Account?           @relation("ToAccount", fields: [toAccountId], references: [id], onDelete: SetNull)
   amount        Decimal            @db.Decimal(18,2)
   status        TransactionStatus  @default(PENDING)
+  fraudDecision FraudDecision?
+  fraudReason   String?
   referenceId   String             @map("reference_id") @unique
   createdAt     DateTime           @default(now()) @map("created_at")
 

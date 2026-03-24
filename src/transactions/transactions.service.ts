@@ -8,12 +8,13 @@ import { Prisma } from '../generated/prisma/client';
 import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
 import { CreateTransferRequestDto } from './dto/create-transfer-request';
 import { RequestContext } from '../common/request-context/request-context';
+import { FraudService } from '../fraud/fraud.service';
 
 @Injectable()
 export class TransactionsService {
     private readonly logger = new Logger(TransactionsService.name);
 
-    constructor(private readonly prisma: PrismaService) { }
+    constructor(private readonly prisma: PrismaService, private readonly fraudService: FraudService) { }
 
     async createDeposit(userId: string, createDepositRequestDto: CreateDepositRequestDto): Promise<TransactionResponseDto> {
         const { amount, referenceId, toAccountId } = createDepositRequestDto;
@@ -233,9 +234,15 @@ export class TransactionsService {
         const existing = await this.prisma.transaction.findUnique({
             where: { referenceId }
         })
-        if (existing && existing.status === TransactionStatus.COMPLETED) {
-            this.logger.log(`Transfer idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
-            return transactionMapper.toResponseDto(existing);
+        if (existing) {
+            if (existing.status === TransactionStatus.COMPLETED) {
+                this.logger.log(`Transfer idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
+                return transactionMapper.toResponseDto(existing);
+            }
+            if (existing.status === TransactionStatus.REJECTED && existing.fraudDecision === 'REJECT') {
+                this.logger.warn(`Transfer idempotent rejected: referenceId=${referenceId}, transactionId=${existing.id}, user=${userId}`);
+                throw new BadRequestException('Transfer rejected by fraud check');
+            }
         }
         try {
 
@@ -273,6 +280,42 @@ export class TransactionsService {
                     this.logger.warn(`Transfer: insufficient funds, balance=${fromAccount.balance}, amount=${amount}`);
                     throw new BadRequestException('Insufficient balance');
                 }
+
+                const fraudResult = this.fraudService.evaluateTransfer({
+                    userId,
+                    fromAccountId,
+                    toAccountId,
+                    amount: amountDecimal,
+                });
+
+                if (fraudResult.decision === 'REJECT') {
+                    const rejectedTransaction = await tx.transaction.create({
+                        data: {
+                            type: TransactionType.TRANSFER,
+                            fromAccountId,
+                            toAccountId,
+                            amount,
+                            referenceId,
+                            status: TransactionStatus.REJECTED,
+                            fraudDecision: fraudResult.decision,
+                            fraudReason: fraudResult.reason,
+                        },
+                    });
+
+                    await tx.auditLog.create({
+                        data: {
+                            action: Action.TRANSFER,
+                            customerId: userId,
+                            entityType: 'TRANSACTION',
+                            entityId: rejectedTransaction.id,
+                            ipAddress: clientIpMasked,
+                            userAgent,
+                        },
+                    });
+
+                    throw new BadRequestException('Transfer rejected by fraud check');
+                }
+
                 const transaction = await tx.transaction.create({
                     data: {
                         type: TransactionType.TRANSFER,
