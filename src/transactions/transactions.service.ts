@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+ import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateDepositRequestDto } from './dto/create-deposit-request';
 import { TransactionResponseDto } from './dto/transaction-response.dto';
@@ -123,12 +123,27 @@ export class TransactionsService {
         const { clientIpMasked, userAgent } = RequestContext.get();
 
         const existing = await this.prisma.transaction.findUnique({
-            where: { referenceId }
-        })
-        if (existing && existing.status === TransactionStatus.COMPLETED) {
-            this.logger.log(`Withdraw idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
-            return transactionMapper.toResponseDto(existing);
-        }
+            where: { referenceId },
+          });
+          
+          if (existing) {
+            if (existing.status === TransactionStatus.COMPLETED) {
+              this.logger.log(
+                `Withdraw idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`,
+              );
+              return transactionMapper.toResponseDto(existing);
+            }
+          
+            if (
+              existing.status === TransactionStatus.REJECTED &&
+              existing.fraudDecision === 'REJECT'
+            ) {
+              this.logger.warn(
+                `Withdraw idempotent rejected: referenceId=${referenceId}, transactionId=${existing.id}, user=${userId}`,
+              );
+              throw new BadRequestException('Withdraw rejected by fraud check');
+            }
+          }
         try {
 
             const result = await this.prisma.$transaction(async (tx) => {
@@ -152,6 +167,43 @@ export class TransactionsService {
                     this.logger.warn(`Withdraw: account balance not enough fromAccountId=${fromAccountId}, balance=${account.balance}, amount=${amount}, user=${userId}`);
                     throw new BadRequestException('Account balance not enough');
                 }
+
+                const fraudResult = await this.fraudService.evaluateWithdraw({
+                    scope: 'WITHDRAW',
+                    userId,
+                    referenceId,
+                    fromAccountId,
+                    amount: amountDecimal,
+                  });
+                  
+                  if (fraudResult.decision === 'REJECT') {
+                    const rejectedTransaction = await tx.transaction.create({
+                      data: {
+                        type: TransactionType.WITHDRAW,
+                        fromAccountId,
+                        toAccountId: null,
+                        amount,
+                        referenceId,
+                        status: TransactionStatus.REJECTED,
+                        fraudDecision: fraudResult.decision,
+                        fraudReason: fraudResult.reason,
+                      },
+                    });
+                  
+                    await tx.auditLog.create({
+                      data: {
+                        action: Action.WITHDRAW,
+                        customerId: userId,
+                        entityType: 'TRANSACTION',
+                        entityId: rejectedTransaction.id,
+                        ipAddress: clientIpMasked,
+                        userAgent,
+                      },
+                    });
+                  
+                    throw new BadRequestException('Withdraw rejected by fraud check');
+                  }
+
                 const transaction = await tx.transaction.create({
                     data: {
                         type: TransactionType.WITHDRAW,
@@ -261,11 +313,6 @@ export class TransactionsService {
                     throw new NotFoundException('Account not found');
                 }
 
-                if (fromAccountId === toAccountId) {
-                    this.logger.warn(`Transfer: same-account transfer attempted fromAccountId=${fromAccountId}, user=${userId}`);
-                    throw new BadRequestException('Cannot transfer to the same account');
-                }
-
                 if (fromAccount.customerId !== userId) {
                     this.logger.warn(`Transfer: forbidden, fromAccountId=${fromAccountId} not owned by user=${userId}`);
                     throw new ForbiddenException('Account not found');
@@ -281,11 +328,13 @@ export class TransactionsService {
                     throw new BadRequestException('Insufficient balance');
                 }
 
-                const fraudResult = this.fraudService.evaluateTransfer({
+                const fraudResult = await this.fraudService.evaluateTransfer({
                     userId,
                     fromAccountId,
                     toAccountId,
                     amount: amountDecimal,
+                    referenceId,
+                    scope: 'TRANSFER',
                 });
 
                 if (fraudResult.decision === 'REJECT') {
