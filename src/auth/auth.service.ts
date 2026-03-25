@@ -14,8 +14,9 @@ import { JwtPayload } from './jwt-payload.interface';
 import * as crypto from 'crypto';
 import { AccountLockedException } from './exceptions/account-locked.exception';
 import { Prisma } from '../generated/prisma/client';
-import { Action as PrismaAction } from '../generated/prisma/enums';
+import { Action as AuditAction } from '../common/enums';
 import { RequestContext } from '../common/request-context/request-context';
+import { AuditService } from '../audit/audit.service';
 
 interface LoginWithRefresh extends LoginResponseDto {
     refreshToken: string;
@@ -28,7 +29,12 @@ interface RefreshResult extends LoginResponseDto {
 @Injectable()
 export class AuthService {
     private readonly logger = new Logger(AuthService.name);
-    constructor(private readonly prisma: PrismaService, private readonly jwtService: JwtService, private readonly config: ConfigService) { }
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly jwtService: JwtService,
+        private readonly config: ConfigService,
+        private readonly audit: AuditService,
+    ) { }
 
     async register(registerRequestDto: RegisterRequestDto): Promise<RegisterResponseDto> {
 
@@ -56,15 +62,13 @@ export class AuthService {
                 phone,
             },
         })
-        await this.prisma.auditLog.create({
-            data: {
-                action: PrismaAction.REGISTER,
-                customerId: registeredCustomer.id,
-                entityType: 'CUSTOMER',
-                entityId: registeredCustomer.id,
-                ipAddress: clientIpMasked,
-                userAgent,
-            },
+        await this.audit.recordSuccess({
+            action: AuditAction.REGISTER,
+            customerId: registeredCustomer.id,
+            entityType: 'CUSTOMER',
+            entityId: registeredCustomer.id,
+            ipAddress: clientIpMasked,
+            userAgent,
         });
 
         this.logger.log(`User registered: ${registeredCustomer.id} (${registeredCustomer.email})`);
@@ -142,15 +146,14 @@ export class AuthService {
 
             const delaySeconds = Math.min(delayCapSeconds, Math.pow(2, newAttempts));
             await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
-            await this.prisma.auditLog.create({
-                data: {
-                    action: PrismaAction.LOGIN,
-                    customerId: customer.id,
-                    entityType: 'CUSTOMER',
-                    entityId: customer.id,
-                    ipAddress: clientIpMasked,
-                    userAgent,
-                },
+            await this.audit.recordFailure({
+                action: AuditAction.LOGIN,
+                customerId: customer.id,
+                entityType: 'CUSTOMER',
+                entityId: customer.id,
+                reasonCode: 'INVALID_CREDENTIALS',
+                ipAddress: clientIpMasked,
+                userAgent,
             });
 
             throw new UnauthorizedException('Invalid credentials');
@@ -188,15 +191,13 @@ export class AuthService {
                 userAgent,
             },
         });
-        await this.prisma.auditLog.create({
-            data: {
-                action: PrismaAction.LOGIN,
-                customerId: customer.id,
-                entityType: 'CUSTOMER',
-                entityId: customer.id,
-                ipAddress: clientIpMasked,
-                userAgent,
-            },
+        await this.audit.recordSuccess({
+            action: AuditAction.LOGIN,
+            customerId: customer.id,
+            entityType: 'CUSTOMER',
+            entityId: customer.id,
+            ipAddress: clientIpMasked,
+            userAgent,
         });
         this.logger.log(`Login successful: ${customer.id} (${customer.email})`);
 
@@ -296,15 +297,13 @@ export class AuthService {
         });
 
         this.logger.log(`Refresh token rotated for user ${customer.id} (${customer.email})`);
-        await this.prisma.auditLog.create({
-            data: {
-                action: PrismaAction.REFRESH,
-                customerId: customer.id,
-                entityType: 'CUSTOMER',
-                entityId: customer.id,
-                ipAddress: clientIpMasked,
-                userAgent,
-            },
+        await this.audit.recordSuccess({
+            action: AuditAction.REFRESH,
+            customerId: customer.id,
+            entityType: 'CUSTOMER',
+            entityId: customer.id,
+            ipAddress: clientIpMasked,
+            userAgent,
         });
 
         const accessPayload: JwtPayload = { sub: customer.id };
@@ -345,15 +344,13 @@ export class AuthService {
                 where: { id: refreshTokenRecord.id },
                 data: { revokedAt: new Date() },
             });
-            await this.prisma.auditLog.create({
-                data: {
-                    action: PrismaAction.LOGOUT,
-                    customerId: refreshTokenRecord.customerId,
-                    entityType: 'CUSTOMER',
-                    entityId: refreshTokenRecord.customerId,
-                    ipAddress: clientIpMasked,
-                    userAgent,
-                },
+            await this.audit.recordSuccess({
+                action: AuditAction.LOGOUT,
+                customerId: refreshTokenRecord.customerId,
+                entityType: 'CUSTOMER',
+                entityId: refreshTokenRecord.customerId,
+                ipAddress: clientIpMasked,
+                userAgent,
             });
         }
 

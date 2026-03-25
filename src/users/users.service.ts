@@ -7,14 +7,18 @@ import { UpdatePasswordRequestDto } from './dto/update-password-request.dto';
 import { UpdatePasswordResponseDto } from './dto/update-password-response.dto';
 import * as bcrypt from 'bcrypt';
 import { RequestContext } from '../common/request-context/request-context';
-import { Action as PrismaAction } from '../generated/prisma/enums';
+import { Action as AuditAction } from '../common/enums';
+import { AuditService } from '../audit/audit.service';
 
 
 @Injectable()
 export class UsersService {
     private readonly logger = new Logger(UsersService.name);
 
-    constructor(private readonly prisma: PrismaService) { }
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly audit: AuditService,
+    ) { }
 
     async getMe(userId: string): Promise<UserMeResponseDto> {
         const user = await this.prisma.customer.findUnique({
@@ -101,15 +105,16 @@ export class UsersService {
             where: { id: userId },
             data: { passwordHash: hashedNewPassword },
         });
-        await this.prisma.auditLog.create({
-            data: {
-                action: PrismaAction.PASSWORD_CHANGE,
-                customerId: userId,
-                entityType: 'CUSTOMER',
-                entityId: userId,
-                ipAddress: clientIpMasked,
-                userAgent,
-            },
+
+        await this.audit.recordSuccess({
+            action: AuditAction.PASSWORD_CHANGE,
+            outcome: undefined,
+            customerId: userId,
+            entityType: 'CUSTOMER',
+            entityId: userId,
+            traceId: undefined,
+            ipAddress: clientIpMasked,
+            userAgent,
         });
         this.logger.log(`Password changed for user ${user.id} (${user.email})`);
         return {

@@ -11,6 +11,7 @@ import { AccountsModule } from './accounts/accounts.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { RabbitMqModule } from './messaging/rabbitmq.module';
 import { OutboxModule } from './outbox/outbox.module';
+import { AuditModule } from './audit/audit.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { OutboxModule } from './outbox/outbox.module';
     TransactionsModule,
     RabbitMqModule,
     OutboxModule,
+    AuditModule,
   ],
   controllers: [AppController],
   providers: [AppService],

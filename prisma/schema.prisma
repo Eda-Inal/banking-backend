@@ -55,6 +55,11 @@ enum EventStatus {
   FAILED
 }
 
+enum AuditOutcome {
+  SUCCESS
+  FAILURE
+}
+
 enum FraudDecision {
   APPROVE
   REJECT
@@ -144,6 +149,15 @@ model Transaction {
 model AuditLog {
   id         String   @id @default(uuid()) @db.Uuid
   action     Action
+
+  outcome    AuditOutcome? @map("outcome")
+
+  actorId    String?       @map("actor_id") @db.Uuid
+  resourceId String?       @map("resource_id") @db.Uuid
+  traceId    String?       @map("trace_id")
+
+  reasonCode String?       @map("reason_code")
+  metadata   Json?         @map("metadata")
 
   customerId String   @map("customer_id") @db.Uuid
   user       Customer @relation(fields: [customerId], references: [id])

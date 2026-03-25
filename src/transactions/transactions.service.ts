@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateDepositRequestDto } from './dto/create-deposit-request';
 import { TransactionResponseDto } from './dto/transaction-response.dto';
 import { transactionMapper } from './transactions.mapper';
-import { TransactionType, TransactionStatus, AccountStatus, Action, EventType, EventStatus } from '../common/enums';
+import { TransactionType, TransactionStatus, AccountStatus, EventType, EventStatus } from '../common/enums';
 import { Prisma } from '../generated/prisma/client';
 import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
 import { CreateTransferRequestDto } from './dto/create-transfer-request';
@@ -106,22 +106,13 @@ export class TransactionsService {
                           amount,
                           fromAccountId: null,
                           toAccountId,
+                          clientIpMasked,
+                          userAgent,
                         },
                       }),
                       status: EventStatus.PENDING,
                     },
                   });
-
-                await tx.auditLog.create({
-                    data: {
-                        action: Action.DEPOSIT,
-                        customerId: userId,
-                        entityType: 'TRANSACTION',
-                        entityId: transaction.id,
-                        ipAddress: clientIpMasked,
-                        userAgent,
-                    },
-                });
 
                 return transactionMapper.toResponseDto(completedTransaction);
             });
@@ -212,18 +203,7 @@ export class TransactionsService {
                         fraudReason: fraudResult.reason,
                       },
                     });
-                  
-                    await tx.auditLog.create({
-                      data: {
-                        action: Action.WITHDRAW,
-                        customerId: userId,
-                        entityType: 'TRANSACTION',
-                        entityId: rejectedTransaction.id,
-                        ipAddress: clientIpMasked,
-                        userAgent,
-                      },
-                    });
-                  
+
                     throw new BadRequestException('Withdraw rejected by fraud check');
                   }
 
@@ -266,21 +246,13 @@ export class TransactionsService {
                           amount,
                           fromAccountId,
                           toAccountId: null,
+                          clientIpMasked,
+                          userAgent,
                         },
                       }),
                       status: EventStatus.PENDING,
                     },
                   });
-                await tx.auditLog.create({
-                    data: {
-                        action: Action.WITHDRAW,
-                        customerId: userId,
-                        entityType: 'TRANSACTION',
-                        entityId: transaction.id,
-                        ipAddress: clientIpMasked,
-                        userAgent,
-                    },
-                });
                 return transactionMapper.toResponseDto(completedTransaction);
 
 
@@ -378,17 +350,6 @@ export class TransactionsService {
                         },
                     });
 
-                    await tx.auditLog.create({
-                        data: {
-                            action: Action.TRANSFER,
-                            customerId: userId,
-                            entityType: 'TRANSACTION',
-                            entityId: rejectedTransaction.id,
-                            ipAddress: clientIpMasked,
-                            userAgent,
-                        },
-                    });
-
                     throw new BadRequestException('Transfer rejected by fraud check');
                 }
 
@@ -435,22 +396,13 @@ export class TransactionsService {
                           amount,
                           fromAccountId,
                           toAccountId,
+                          clientIpMasked,
+                          userAgent,
                         },
                       }),
                       status: EventStatus.PENDING,
                     },
                   });
-                  
-                await tx.auditLog.create({
-                    data: {
-                        action: Action.TRANSFER,
-                        customerId: userId,
-                        entityType: 'TRANSACTION',
-                        entityId: transaction.id,
-                        ipAddress: clientIpMasked,
-                        userAgent,
-                    },
-                });
                 return transactionMapper.toResponseDto(completedTransaction);
             });
             this.logger.log(`Transfer completed: txId=${result.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`);

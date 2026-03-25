@@ -47,3 +47,8 @@ export enum EventStatus {
     PROCESSED = 'PROCESSED',
     FAILED = 'FAILED',
 }
+
+export enum AuditOutcome {
+    SUCCESS = 'SUCCESS',
+    FAILURE = 'FAILURE',
+  }

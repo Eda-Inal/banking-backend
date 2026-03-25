@@ -9,6 +9,8 @@ export type TransactionEventMetadata = {
   fromAccountId?: string | null;
   toAccountId?: string | null;
   fraudRule?: string;
+  clientIpMasked?: string;
+  userAgent?: string;
 };
 
 export type TransactionEventPayload = {

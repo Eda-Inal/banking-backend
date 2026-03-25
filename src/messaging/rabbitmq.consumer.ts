@@ -9,9 +9,10 @@ import type { Channel, ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'crypto';
 import { CONFIG_KEYS } from '../config/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuditService } from '../audit/audit.service';
 import { RabbitMqConnection } from './rabbitmq.connection';
 import type { TransactionEventPayload } from '../common/transaction-event.contract';
-import { TransactionType, EventType } from '../common/enums';
+import { Action, TransactionType, EventType } from '../common/enums';
 
 type ConsumedEventMessage = {
   eventId?: string;
@@ -90,6 +91,22 @@ function validateTransactionEventPayload(payload: unknown): TransactionEventPayl
     throw new PermanentConsumerError('invalid transaction payload: metadata.fraudRule');
   }
 
+
+  if (
+    m.clientIpMasked !== undefined &&
+    m.clientIpMasked !== null &&
+    !isNonEmptyString(m.clientIpMasked)
+  ) {
+    throw new PermanentConsumerError('invalid transaction payload: metadata.clientIpMasked');
+  }
+  if (
+    m.userAgent !== undefined &&
+    m.userAgent !== null &&
+    !isNonEmptyString(m.userAgent)
+  ) {
+    throw new PermanentConsumerError('invalid transaction payload: metadata.userAgent');
+  }
+
   return p as TransactionEventPayload;
 }
 
@@ -110,6 +127,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
     private readonly rabbit: RabbitMqConnection,
   ) {}
 
@@ -271,6 +289,28 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
     switch (message.type) {
       case EventType.TRANSACTION_COMPLETED: {
         const payload = validateTransactionEventPayload(message.payload);
+
+        const txType = payload.metadata.transactionType;
+        const action =
+          txType === TransactionType.DEPOSIT
+            ? Action.DEPOSIT
+            : txType === TransactionType.WITHDRAW
+              ? Action.WITHDRAW
+              : Action.TRANSFER;
+
+        await this.audit.recordSuccess({
+          action,
+          customerId: payload.actorId,
+          entityType: 'TRANSACTION',
+          entityId: payload.resourceId,
+          actorId: payload.actorId,
+          resourceId: payload.resourceId,
+          traceId: payload.traceId,
+          ipAddress: payload.metadata.clientIpMasked ?? null,
+          userAgent: payload.metadata.userAgent ?? null,
+          metadata: payload.metadata as any,
+        });
+
         this.logger.log(
           `Handled TRANSACTION_COMPLETED tx=${payload.resourceId} actor=${payload.actorId} trace=${payload.traceId}`,
         );
@@ -279,6 +319,29 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
 
       case EventType.TRANSACTION_FAILED: {
         const payload = validateTransactionEventPayload(message.payload);
+
+        const txType = payload.metadata.transactionType;
+        const action =
+          txType === TransactionType.DEPOSIT
+            ? Action.DEPOSIT
+            : txType === TransactionType.WITHDRAW
+              ? Action.WITHDRAW
+              : Action.TRANSFER;
+
+        await this.audit.recordFailure({
+          action,
+          customerId: payload.actorId,
+          entityType: 'TRANSACTION',
+          entityId: payload.resourceId,
+          actorId: payload.actorId,
+          resourceId: payload.resourceId,
+          traceId: payload.traceId,
+          reasonCode: payload.reasonCode,
+          ipAddress: payload.metadata.clientIpMasked ?? null,
+          userAgent: payload.metadata.userAgent ?? null,
+          metadata: payload.metadata as any,
+        });
+
         this.logger.warn(
           `Handled TRANSACTION_FAILED tx=${payload.resourceId} actor=${payload.actorId} trace=${payload.traceId} reasonCode=${payload.reasonCode ?? 'n/a'}`,
         );
