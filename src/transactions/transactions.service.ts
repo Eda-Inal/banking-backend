@@ -9,6 +9,7 @@ import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
 import { CreateTransferRequestDto } from './dto/create-transfer-request';
 import { RequestContext } from '../common/request-context/request-context';
 import { FraudService } from '../fraud/fraud.service';
+import type { TransactionEventMetadata, TransactionEventPayload } from '../common/transaction-event.contract';
 
 @Injectable()
 export class TransactionsService {
@@ -16,9 +17,27 @@ export class TransactionsService {
 
     constructor(private readonly prisma: PrismaService, private readonly fraudService: FraudService) { }
 
+    private buildTransactionEventPayload(params: {
+        actorId: string;
+        resourceId: string;
+        traceId: string;
+        outcome: 'SUCCESS' | 'FAILURE';
+        reasonCode?: string;
+        metadata: TransactionEventMetadata;
+      }): TransactionEventPayload {
+        return {
+          actorId: params.actorId,
+          resourceId: params.resourceId,
+          traceId: params.traceId,
+          outcome: params.outcome,
+          reasonCode: params.reasonCode,
+          metadata: params.metadata,
+        };
+      }
+
     async createDeposit(userId: string, createDepositRequestDto: CreateDepositRequestDto): Promise<TransactionResponseDto> {
         const { amount, referenceId, toAccountId } = createDepositRequestDto;
-        const { clientIpMasked, userAgent } = RequestContext.get();
+        const { clientIpMasked, userAgent, traceId } = RequestContext.get();
 
         const existing = await this.prisma.transaction.findUnique({
             where: { referenceId }
@@ -75,19 +94,23 @@ export class TransactionsService {
 
                 await tx.event.create({
                     data: {
-                        type: EventType.TRANSACTION_COMPLETED,
-                        payload: {
-                            transactionId: transaction.id,
-                            type: TransactionType.DEPOSIT,
-                            status: TransactionStatus.COMPLETED,
-                            toAccountId,
-                            amount,
-                            referenceId,
-                            createdAt: transaction.createdAt,
+                      type: EventType.TRANSACTION_COMPLETED,
+                      payload: this.buildTransactionEventPayload({
+                        actorId: userId,
+                        resourceId: completedTransaction.id,
+                        traceId: traceId ?? 'missing-trace-id',
+                        outcome: 'SUCCESS',
+                        metadata: {
+                          transactionType: TransactionType.DEPOSIT,
+                          referenceId,
+                          amount,
+                          fromAccountId: null,
+                          toAccountId,
                         },
-                        status: EventStatus.PENDING,
+                      }),
+                      status: EventStatus.PENDING,
                     },
-                });
+                  });
 
                 await tx.auditLog.create({
                     data: {
@@ -120,7 +143,7 @@ export class TransactionsService {
     async createWithdraw(userId: string, createWithdrawRequestDto: CreateWithdrawRequestDto): Promise<TransactionResponseDto> {
         const { amount, referenceId, fromAccountId } = createWithdrawRequestDto;
         const amountDecimal = new Prisma.Decimal(amount);
-        const { clientIpMasked, userAgent } = RequestContext.get();
+        const { clientIpMasked, userAgent, traceId } = RequestContext.get();
 
         const existing = await this.prisma.transaction.findUnique({
             where: { referenceId },
@@ -231,19 +254,23 @@ export class TransactionsService {
 
                 await tx.event.create({
                     data: {
-                        type: EventType.TRANSACTION_COMPLETED,
-                        payload: {
-                            transactionId: transaction.id,
-                            type: TransactionType.WITHDRAW,
-                            status: TransactionStatus.COMPLETED,
-                            fromAccountId,
-                            amount,
-                            referenceId,
-                            createdAt: transaction.createdAt,
+                      type: EventType.TRANSACTION_COMPLETED,
+                      payload: this.buildTransactionEventPayload({
+                        actorId: userId,
+                        resourceId: completedTransaction.id,
+                        traceId: traceId ?? 'missing-trace-id',
+                        outcome: 'SUCCESS',
+                        metadata: {
+                          transactionType: TransactionType.WITHDRAW,
+                          referenceId,
+                          amount,
+                          fromAccountId,
+                          toAccountId: null,
                         },
-                        status: EventStatus.PENDING,
+                      }),
+                      status: EventStatus.PENDING,
                     },
-                });
+                  });
                 await tx.auditLog.create({
                     data: {
                         action: Action.WITHDRAW,
@@ -280,7 +307,7 @@ export class TransactionsService {
 
         const { amount, referenceId, toAccountId, fromAccountId } = createTransferRequestDto;
         const amountDecimal = new Prisma.Decimal(amount);
-        const { clientIpMasked, userAgent } = RequestContext.get();
+        const { clientIpMasked, userAgent, traceId } = RequestContext.get();
 
 
         const existing = await this.prisma.transaction.findUnique({
@@ -396,20 +423,24 @@ export class TransactionsService {
                 });
                 await tx.event.create({
                     data: {
-                        type: EventType.TRANSACTION_COMPLETED,
-                        payload: {
-                            transactionId: transaction.id,
-                            type: TransactionType.TRANSFER,
-                            status: TransactionStatus.COMPLETED,
-                            fromAccountId,
-                            toAccountId,
-                            amount,
-                            referenceId,
-                            createdAt: transaction.createdAt,
+                      type: EventType.TRANSACTION_COMPLETED,
+                      payload: this.buildTransactionEventPayload({
+                        actorId: userId,
+                        resourceId: completedTransaction.id,
+                        traceId: traceId ?? 'missing-trace-id',
+                        outcome: 'SUCCESS',
+                        metadata: {
+                          transactionType: TransactionType.TRANSFER,
+                          referenceId,
+                          amount,
+                          fromAccountId,
+                          toAccountId,
                         },
-                        status: EventStatus.PENDING,
+                      }),
+                      status: EventStatus.PENDING,
                     },
-                });
+                  });
+                  
                 await tx.auditLog.create({
                     data: {
                         action: Action.TRANSFER,

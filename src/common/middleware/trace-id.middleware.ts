@@ -22,7 +22,7 @@ export class TraceIdMiddleware implements NestMiddleware {
       this.logger.log(`[${traceId}] Response status: ${res.statusCode}`);
     });
   
-    RequestContext.run({ clientIpMasked, userAgent }, () => {
+    RequestContext.run({ clientIpMasked, userAgent, traceId }, () => {
       next();
     });
   }

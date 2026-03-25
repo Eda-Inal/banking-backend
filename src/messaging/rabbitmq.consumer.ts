@@ -7,10 +7,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'crypto';
-import { EventType } from '../common/enums';
 import { CONFIG_KEYS } from '../config/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { RabbitMqConnection } from './rabbitmq.connection';
+import type { TransactionEventPayload } from '../common/transaction-event.contract';
+import { TransactionType, EventType } from '../common/enums';
 
 type ConsumedEventMessage = {
   eventId?: string;
@@ -29,6 +30,68 @@ type ConsumerMetrics = {
   requeued: number;
   lastMessageAt: string | null;
 };
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+function isValidTransactionType(v: unknown): v is TransactionType {
+  return typeof v === 'string' && Object.values(TransactionType).includes(v as TransactionType);
+}
+
+function validateTransactionEventPayload(payload: unknown): TransactionEventPayload {
+  if (!payload || typeof payload !== 'object') {
+    throw new PermanentConsumerError('invalid transaction payload: not an object');
+  }
+
+  const p = payload as any;
+
+  if (!isNonEmptyString(p.actorId)) {
+    throw new PermanentConsumerError('invalid transaction payload: actorId');
+  }
+  if (!isNonEmptyString(p.resourceId)) {
+    throw new PermanentConsumerError('invalid transaction payload: resourceId');
+  }
+  if (!isNonEmptyString(p.traceId)) {
+    throw new PermanentConsumerError('invalid transaction payload: traceId');
+  }
+  if (p.outcome !== 'SUCCESS' && p.outcome !== 'FAILURE') {
+    throw new PermanentConsumerError('invalid transaction payload: outcome');
+  }
+
+  if (p.reasonCode !== undefined && p.reasonCode !== null && !isNonEmptyString(p.reasonCode)) {
+    throw new PermanentConsumerError('invalid transaction payload: reasonCode');
+  }
+
+  const m = p.metadata;
+  if (!m || typeof m !== 'object') {
+    throw new PermanentConsumerError('invalid transaction payload: metadata');
+  }
+  if (!isValidTransactionType(m.transactionType)) {
+    throw new PermanentConsumerError('invalid transaction payload: metadata.transactionType');
+  }
+  if (!isNonEmptyString(m.referenceId)) {
+    throw new PermanentConsumerError('invalid transaction payload: metadata.referenceId');
+  }
+  if (typeof m.amount !== 'number' || !Number.isFinite(m.amount)) {
+    throw new PermanentConsumerError('invalid transaction payload: metadata.amount');
+  }
+
+  const fromOk =
+    m.fromAccountId === null || m.fromAccountId === undefined || isNonEmptyString(m.fromAccountId);
+  const toOk =
+    m.toAccountId === null || m.toAccountId === undefined || isNonEmptyString(m.toAccountId);
+
+  if (!fromOk || !toOk) {
+    throw new PermanentConsumerError('invalid transaction payload: metadata account ids');
+  }
+
+  if (m.fraudRule !== undefined && m.fraudRule !== null && !isNonEmptyString(m.fraudRule)) {
+    throw new PermanentConsumerError('invalid transaction payload: metadata.fraudRule');
+  }
+
+  return p as TransactionEventPayload;
+}
 
 @Injectable()
 export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
@@ -201,14 +264,27 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
     `;
     return existing.length > 0;
   }
+  
 
+  
   private async dispatchEvent(message: ConsumedEventMessage): Promise<void> {
     switch (message.type) {
-      case EventType.TRANSACTION_COMPLETED:
+      case EventType.TRANSACTION_COMPLETED: {
+        const payload = validateTransactionEventPayload(message.payload);
         this.logger.log(
-          `Handled TRANSACTION_COMPLETED eventId=${message.eventId ?? 'n/a'}`,
+          `Handled TRANSACTION_COMPLETED tx=${payload.resourceId} actor=${payload.actorId} trace=${payload.traceId}`,
         );
         return;
+      }
+
+      case EventType.TRANSACTION_FAILED: {
+        const payload = validateTransactionEventPayload(message.payload);
+        this.logger.warn(
+          `Handled TRANSACTION_FAILED tx=${payload.resourceId} actor=${payload.actorId} trace=${payload.traceId} reasonCode=${payload.reasonCode ?? 'n/a'}`,
+        );
+        return;
+      }
+
       default:
         throw new PermanentConsumerError(`unsupported event type: ${message.type}`);
     }

@@ -5,10 +5,13 @@ import { RabbitMqPublisher } from '../messaging/rabbitmq.publisher';
 import { EventStatus } from '../common/enums';
 import { CONFIG_KEYS } from '../config/config';
 
+const SCHEMA_VERSION = '1';
+
 type OutboxPublishMessage = {
   eventId: string;
   type: string;
-  occurredAt: Date;
+  occurredAt: string;
+  schemaVersion: string;
   payload: unknown;
 };
 
@@ -86,7 +89,8 @@ export class OutboxService {
         const message: OutboxPublishMessage = {
           eventId: evt.id,
           type: evt.type,
-          occurredAt: evt.createdAt,
+          occurredAt: evt.createdAt.toISOString(),
+          schemaVersion: SCHEMA_VERSION,
           payload: evt.payload,
         };
 
@@ -100,7 +104,7 @@ export class OutboxService {
             headers: {
               eventType: evt.type,
               source: 'banking-backend',
-              schemaVersion: '1',
+              schemaVersion: SCHEMA_VERSION,
             },
           },
         );
