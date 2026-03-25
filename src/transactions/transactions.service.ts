@@ -158,9 +158,13 @@ export class TransactionsService {
               throw new BadRequestException('Withdraw rejected by fraud check');
             }
           }
+        type WithdrawTxResult =
+          | { kind: 'SUCCESS'; dto: TransactionResponseDto }
+          | { kind: 'REJECT'; rejectedTransactionId: string };
+
         try {
 
-            const result = await this.prisma.$transaction(async (tx) => {
+            const result = (await this.prisma.$transaction(async (tx) => {
                 const account = await tx.account.findUnique({
                     where: { id: fromAccountId }
                 });
@@ -204,7 +208,34 @@ export class TransactionsService {
                       },
                     });
 
-                    throw new BadRequestException('Withdraw rejected by fraud check');
+                    await tx.event.create({
+                      data: {
+                        type: EventType.TRANSACTION_FAILED,
+                        payload: this.buildTransactionEventPayload({
+                          actorId: userId,
+                          resourceId: rejectedTransaction.id,
+                          traceId: traceId ?? 'missing-trace-id',
+                          outcome: 'FAILURE',
+                          reasonCode: 'FRAUD_REJECTED',
+                          metadata: {
+                            transactionType: TransactionType.WITHDRAW,
+                            referenceId,
+                            amount,
+                            fromAccountId,
+                            toAccountId: null,
+                            fraudRule: fraudResult.reason,
+                            clientIpMasked,
+                            userAgent,
+                          },
+                        }),
+                        status: EventStatus.PENDING,
+                      },
+                    });
+
+                    return {
+                      kind: 'REJECT',
+                      rejectedTransactionId: rejectedTransaction.id,
+                    };
                   }
 
                 const transaction = await tx.transaction.create({
@@ -253,13 +284,19 @@ export class TransactionsService {
                       status: EventStatus.PENDING,
                     },
                   });
-                return transactionMapper.toResponseDto(completedTransaction);
+                return {
+                  kind: 'SUCCESS',
+                  dto: transactionMapper.toResponseDto(completedTransaction),
+                };
 
 
 
-            });
-            this.logger.log(`Withdraw completed: transactionId=${result.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`);
-            return result;
+            })) as WithdrawTxResult;
+            if (result.kind === 'REJECT') {
+              throw new BadRequestException('Withdraw rejected by fraud check');
+            }
+            this.logger.log(`Withdraw completed: transactionId=${result.dto.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`);
+            return result.dto;
 
 
         } catch (err) {
@@ -295,9 +332,13 @@ export class TransactionsService {
                 throw new BadRequestException('Transfer rejected by fraud check');
             }
         }
+        type TransferTxResult =
+          | { kind: 'SUCCESS'; dto: TransactionResponseDto }
+          | { kind: 'REJECT'; rejectedTransactionId: string };
+
         try {
 
-            const result = await this.prisma.$transaction(async (tx) => {
+            const result = (await this.prisma.$transaction(async (tx) => {
 
                 const [fromAccount, toAccount] = await Promise.all([
                     tx.account.findUnique({ where: { id: fromAccountId } }),
@@ -350,7 +391,34 @@ export class TransactionsService {
                         },
                     });
 
-                    throw new BadRequestException('Transfer rejected by fraud check');
+                    await tx.event.create({
+                        data: {
+                            type: EventType.TRANSACTION_FAILED,
+                            payload: this.buildTransactionEventPayload({
+                                actorId: userId,
+                                resourceId: rejectedTransaction.id,
+                                traceId: traceId ?? 'missing-trace-id',
+                                outcome: 'FAILURE',
+                                reasonCode: 'FRAUD_REJECTED',
+                                metadata: {
+                                    transactionType: TransactionType.TRANSFER,
+                                    referenceId,
+                                    amount,
+                                    fromAccountId,
+                                    toAccountId,
+                                    fraudRule: fraudResult.reason,
+                                    clientIpMasked,
+                                    userAgent,
+                                },
+                            }),
+                            status: EventStatus.PENDING,
+                        },
+                    });
+
+                    return {
+                        kind: 'REJECT',
+                        rejectedTransactionId: rejectedTransaction.id,
+                    };
                 }
 
                 const transaction = await tx.transaction.create({
@@ -403,10 +471,16 @@ export class TransactionsService {
                       status: EventStatus.PENDING,
                     },
                   });
-                return transactionMapper.toResponseDto(completedTransaction);
-            });
-            this.logger.log(`Transfer completed: txId=${result.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`);
-            return result;
+                return {
+                    kind: 'SUCCESS',
+                    dto: transactionMapper.toResponseDto(completedTransaction),
+                };
+            })) as TransferTxResult;
+            if (result.kind === 'REJECT') {
+                throw new BadRequestException('Transfer rejected by fraud check');
+            }
+            this.logger.log(`Transfer completed: txId=${result.dto.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`);
+            return result.dto;
         }
         catch (err) {
             const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
