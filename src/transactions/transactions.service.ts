@@ -10,6 +10,7 @@ import { CreateTransferRequestDto } from './dto/create-transfer-request';
 import { RequestContext } from '../common/request-context/request-context';
 import { FraudService } from '../fraud/fraud.service';
 import type { TransactionEventMetadata, TransactionEventPayload } from '../common/transaction-event.contract';
+import { getFraudRejectionMessage } from '../fraud/fraud-user-messages';
 
 @Injectable()
 export class TransactionsService {
@@ -155,12 +156,14 @@ export class TransactionsService {
               this.logger.warn(
                 `Withdraw idempotent rejected: referenceId=${referenceId}, transactionId=${existing.id}, user=${userId}`,
               );
-              throw new BadRequestException('Withdraw rejected by fraud check');
+              throw new BadRequestException(
+                getFraudRejectionMessage(TransactionType.WITHDRAW, existing.fraudReason ?? undefined),
+              );
             }
           }
         type WithdrawTxResult =
           | { kind: 'SUCCESS'; dto: TransactionResponseDto }
-          | { kind: 'REJECT'; rejectedTransactionId: string };
+          | { kind: 'REJECT'; rejectedTransactionId: string; fraudReason?: string };
 
         try {
 
@@ -235,6 +238,7 @@ export class TransactionsService {
                     return {
                       kind: 'REJECT',
                       rejectedTransactionId: rejectedTransaction.id,
+                      fraudReason: fraudResult.reason,
                     };
                   }
 
@@ -293,7 +297,9 @@ export class TransactionsService {
 
             })) as WithdrawTxResult;
             if (result.kind === 'REJECT') {
-              throw new BadRequestException('Withdraw rejected by fraud check');
+              throw new BadRequestException(
+                getFraudRejectionMessage(TransactionType.WITHDRAW, result.fraudReason),
+              );
             }
             this.logger.log(`Withdraw completed: transactionId=${result.dto.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`);
             return result.dto;
@@ -329,12 +335,14 @@ export class TransactionsService {
             }
             if (existing.status === TransactionStatus.REJECTED && existing.fraudDecision === 'REJECT') {
                 this.logger.warn(`Transfer idempotent rejected: referenceId=${referenceId}, transactionId=${existing.id}, user=${userId}`);
-                throw new BadRequestException('Transfer rejected by fraud check');
+                throw new BadRequestException(
+                  getFraudRejectionMessage(TransactionType.TRANSFER, existing.fraudReason ?? undefined),
+                );
             }
         }
         type TransferTxResult =
           | { kind: 'SUCCESS'; dto: TransactionResponseDto }
-          | { kind: 'REJECT'; rejectedTransactionId: string };
+          | { kind: 'REJECT'; rejectedTransactionId: string; fraudReason?: string };
 
         try {
 
@@ -418,6 +426,7 @@ export class TransactionsService {
                     return {
                         kind: 'REJECT',
                         rejectedTransactionId: rejectedTransaction.id,
+                        fraudReason: fraudResult.reason,
                     };
                 }
 
@@ -477,7 +486,9 @@ export class TransactionsService {
                 };
             })) as TransferTxResult;
             if (result.kind === 'REJECT') {
-                throw new BadRequestException('Transfer rejected by fraud check');
+                throw new BadRequestException(
+                  getFraudRejectionMessage(TransactionType.TRANSFER, result.fraudReason),
+                );
             }
             this.logger.log(`Transfer completed: txId=${result.dto.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`);
             return result.dto;
