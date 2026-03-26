@@ -7,7 +7,9 @@ import {
   HttpStatus,
   Injectable,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
+import { CONFIG_KEYS } from '../../config/config';
 import { RedisService } from '../../redis/redis.service';
 
 export type IdempotencyRequest = Request & {
@@ -17,11 +19,14 @@ export type IdempotencyRequest = Request & {
 };
 
 const KEY_PREFIX = 'transactions:idempotency:';
-const IN_FLIGHT_TTL_SECONDS = 30;
+const DEFAULT_IN_FLIGHT_TTL_SECONDS = 180;
 
 @Injectable()
 export class TransactionsIdempotencyGuard implements CanActivate {
-  constructor(private readonly redis: RedisService) {}
+  constructor(
+    private readonly redis: RedisService,
+    private readonly config: ConfigService,
+  ) {}
 
   private extractReferenceId(request: Request): string | undefined {
     const headerValue = request.headers['x-reference-id'];
@@ -64,6 +69,11 @@ export class TransactionsIdempotencyGuard implements CanActivate {
         throw new BadRequestException('Missing referenceId');
       }
       const operation = this.extractOperation(request);
+      const inFlightTtlSeconds = Number(
+        this.config.get<string>(
+          CONFIG_KEYS.TRANSACTIONS_IDEMPOTENCY_IN_FLIGHT_TTL_SEC,
+        ) ?? DEFAULT_IN_FLIGHT_TTL_SECONDS.toString(),
+      );
 
       const key = `${KEY_PREFIX}${userId}:${operation}:${referenceId}`;
       const client = this.redis.getClient();
@@ -72,7 +82,7 @@ export class TransactionsIdempotencyGuard implements CanActivate {
         key,
         'in-flight',
         'EX',
-        IN_FLIGHT_TTL_SECONDS,
+        inFlightTtlSeconds,
         'NX',
       );
       

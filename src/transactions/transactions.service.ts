@@ -26,6 +26,7 @@ type TransferTxResult =
 @Injectable()
 export class TransactionsService {
   private readonly logger = new Logger(TransactionsService.name);
+  private readonly transferRetryAttempts = 3;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -35,6 +36,35 @@ export class TransactionsService {
     private readonly transactionRepository: TransactionRepository,
     private readonly transactionEventWriter: TransactionEventWriter,
   ) {}
+
+  private isRetryableTransactionError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message.toLowerCase() : '';
+    const code =
+      err &&
+      typeof err === 'object' &&
+      'code' in err &&
+      typeof (err as { code?: unknown }).code === 'string'
+        ? ((err as { code?: string }).code as string)
+        : undefined;
+
+    // Prisma uses P2034 for transaction conflicts/deadlocks.
+    if (code === 'P2034') {
+      return true;
+    }
+
+    // Fallback checks for raw/driver surfaced PostgreSQL deadlock/serialization codes.
+    return (
+      message.includes('deadlock') ||
+      message.includes('40p01') ||
+      message.includes('40001')
+    );
+  }
+
+  private async backoffDelay(attempt: number): Promise<void> {
+    const delays = [20, 60, 120];
+    const ms = delays[Math.min(attempt, delays.length - 1)];
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   async createDeposit(
     userId: string,
@@ -174,15 +204,6 @@ export class TransactionsService {
           fromAccountId,
           'Account is not active',
         );
-        this.accountValidator.ensureSufficientBalanceOrThrow(
-          account.balance,
-          amountDecimal,
-          userId,
-          'Withdraw',
-          fromAccountId,
-          amount,
-          'Account balance not enough',
-        );
 
         const fraudResult = await this.fraudService.evaluateWithdraw({
           scope: 'WITHDRAW',
@@ -235,11 +256,15 @@ export class TransactionsService {
             referenceId,
           });
 
-        await this.transactionRepository.decrementBalance(
-          tx,
-          fromAccountId,
-          amount,
-        );
+        const withdrawDecrement =
+          await this.transactionRepository.decrementBalance(
+            tx,
+            fromAccountId,
+            amount,
+          );
+        if (withdrawDecrement.count !== 1) {
+          throw new BadRequestException('Account balance not enough');
+        }
         const completedTransaction = await this.transactionRepository.markCompleted(
           tx,
           transaction.id,
@@ -314,7 +339,10 @@ export class TransactionsService {
     }
 
     try {
-      const result = (await this.prisma.$transaction(async (tx) => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < this.transferRetryAttempts; attempt++) {
+        try {
+          const result = (await this.prisma.$transaction(async (tx) => {
         const fromAccount = await this.accountValidator.getAccountOrThrow(
           tx,
           fromAccountId,
@@ -334,15 +362,6 @@ export class TransactionsService {
           'Transfer',
           fromAccountId,
           'From account is not active',
-        );
-        this.accountValidator.ensureSufficientBalanceOrThrow(
-          fromAccount.balance,
-          amountDecimal,
-          userId,
-          'Transfer',
-          fromAccountId,
-          amount,
-          'Insufficient balance',
         );
 
         const fraudResult = await this.fraudService.evaluateTransfer({
@@ -397,12 +416,31 @@ export class TransactionsService {
             referenceId,
           });
 
-        await this.transactionRepository.decrementBalance(
-          tx,
-          fromAccountId,
-          amount,
-        );
-        await this.transactionRepository.incrementBalance(tx, toAccountId, amount);
+        // Acquire row locks in deterministic account-id order to reduce deadlock risk.
+        const [firstAccountId, secondAccountId] =
+          fromAccountId < toAccountId
+            ? [fromAccountId, toAccountId]
+            : [toAccountId, fromAccountId];
+
+        for (const accountId of [firstAccountId, secondAccountId]) {
+          if (accountId === fromAccountId) {
+            const transferDecrement =
+              await this.transactionRepository.decrementBalance(
+                tx,
+                fromAccountId,
+                amount,
+              );
+            if (transferDecrement.count !== 1) {
+              throw new BadRequestException('Insufficient balance');
+            }
+          } else {
+            await this.transactionRepository.incrementBalance(
+              tx,
+              toAccountId,
+              amount,
+            );
+          }
+        }
 
         const completedTransaction = await this.transactionRepository.markCompleted(
           tx,
@@ -427,18 +465,38 @@ export class TransactionsService {
           kind: 'SUCCESS',
           dto: transactionMapper.toResponseDto(completedTransaction),
         };
-      })) as TransferTxResult;
+          })) as TransferTxResult;
 
-      if (result.kind === 'REJECT') {
-        throw new BadRequestException(
-          getFraudRejectionMessage(TransactionType.TRANSFER, result.fraudReason),
-        );
+          if (result.kind === 'REJECT') {
+            throw new BadRequestException(
+              getFraudRejectionMessage(
+                TransactionType.TRANSFER,
+                result.fraudReason,
+              ),
+            );
+          }
+
+          this.logger.log(
+            `Transfer completed: txId=${result.dto.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`,
+          );
+          return result.dto;
+        } catch (err) {
+          lastError = err;
+          if (
+            attempt < this.transferRetryAttempts - 1 &&
+            this.isRetryableTransactionError(err)
+          ) {
+            this.logger.warn(
+              `Transfer retry due to transaction conflict. attempt=${attempt + 1}, from=${fromAccountId}, to=${toAccountId}, referenceId=${referenceId}`,
+            );
+            await this.backoffDelay(attempt);
+            continue;
+          }
+          throw err;
+        }
       }
 
-      this.logger.log(
-        `Transfer completed: txId=${result.dto.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`,
-      );
-      return result.dto;
+      throw lastError;
     } catch (err) {
       const fallback = await this.idempotencyChecker.resolveP2002Fallback({
         err,

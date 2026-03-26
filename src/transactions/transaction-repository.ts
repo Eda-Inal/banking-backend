@@ -65,8 +65,11 @@ export class TransactionRepository {
     accountId: string,
     amount: number,
   ) {
-    await tx.account.update({
-      where: { id: accountId },
+    return tx.account.updateMany({
+      where: {
+        id: accountId,
+        balance: { gte: amount },
+      },
       data: { balance: { decrement: amount } },
     });
   }
