@@ -1,521 +1,452 @@
- import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { CreateDepositRequestDto } from './dto/create-deposit-request';
-import { TransactionResponseDto } from './dto/transaction-response.dto';
-import { transactionMapper } from './transactions.mapper';
-import { TransactionType, TransactionStatus, AccountStatus, EventType, EventStatus } from '../common/enums';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { FraudService } from '../fraud/fraud.service';
+import { getFraudRejectionMessage } from '../fraud/fraud-user-messages';
+import { RequestContext } from '../common/request-context/request-context';
+import { TransactionType } from '../common/enums';
+import { CreateDepositRequestDto } from './dto/create-deposit-request';
 import { CreateWithdrawRequestDto } from './dto/create-withdraw-request';
 import { CreateTransferRequestDto } from './dto/create-transfer-request';
-import { RequestContext } from '../common/request-context/request-context';
-import { FraudService } from '../fraud/fraud.service';
-import type { TransactionEventMetadata, TransactionEventPayload } from '../common/transaction-event.contract';
-import { getFraudRejectionMessage } from '../fraud/fraud-user-messages';
+import { TransactionResponseDto } from './dto/transaction-response.dto';
+import { transactionMapper } from './transactions.mapper';
+import { TransactionAccountValidator } from './transaction-account-validator';
+import { TransactionIdempotencyChecker } from './transaction-idempotency-checker';
+import { TransactionRepository } from './transaction-repository';
+import { TransactionEventWriter } from './transaction-event-writer';
+
+type WithdrawTxResult =
+  | { kind: 'SUCCESS'; dto: TransactionResponseDto }
+  | { kind: 'REJECT'; fraudReason?: string };
+
+type TransferTxResult =
+  | { kind: 'SUCCESS'; dto: TransactionResponseDto }
+  | { kind: 'REJECT'; fraudReason?: string };
 
 @Injectable()
 export class TransactionsService {
-    private readonly logger = new Logger(TransactionsService.name);
+  private readonly logger = new Logger(TransactionsService.name);
 
-    constructor(private readonly prisma: PrismaService, private readonly fraudService: FraudService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly fraudService: FraudService,
+    private readonly accountValidator: TransactionAccountValidator,
+    private readonly idempotencyChecker: TransactionIdempotencyChecker,
+    private readonly transactionRepository: TransactionRepository,
+    private readonly transactionEventWriter: TransactionEventWriter,
+  ) {}
 
-    private buildTransactionEventPayload(params: {
-        actorId: string;
-        resourceId: string;
-        traceId: string;
-        outcome: 'SUCCESS' | 'FAILURE';
-        reasonCode?: string;
-        metadata: TransactionEventMetadata;
-      }): TransactionEventPayload {
+  async createDeposit(
+    userId: string,
+    createDepositRequestDto: CreateDepositRequestDto,
+  ): Promise<TransactionResponseDto> {
+    const { amount, referenceId, toAccountId } = createDepositRequestDto;
+    const { clientIpMasked, userAgent, traceId } = RequestContext.get();
+
+    const existing = await this.idempotencyChecker.findExisting(
+      userId,
+      referenceId,
+    );
+    const idempotentResult = this.idempotencyChecker.resolveExistingOrThrow({
+      existing,
+      referenceId,
+      userId,
+      type: TransactionType.DEPOSIT,
+    });
+    if (idempotentResult) {
+      return idempotentResult;
+    }
+
+    try {
+      const result = await this.prisma.$transaction(async (tx) => {
+        const account = await this.accountValidator.getAccountOrThrow(
+          tx,
+          toAccountId,
+          'Deposit',
+        );
+        this.accountValidator.ensureOwnedByUserOrThrow(
+          account.customerId,
+          userId,
+          'Deposit',
+          toAccountId,
+        );
+        this.accountValidator.ensureActiveOrThrow(
+          account.status,
+          userId,
+          'Deposit',
+          toAccountId,
+          'Account is not active',
+        );
+
+        const transaction =
+          await this.transactionRepository.createPendingTransaction({
+            tx,
+            type: TransactionType.DEPOSIT,
+            actorCustomerId: userId,
+            fromAccountId: null,
+            toAccountId,
+            amount,
+            referenceId,
+          });
+
+        await this.transactionRepository.incrementBalance(tx, toAccountId, amount);
+        const completedTransaction = await this.transactionRepository.markCompleted(
+          tx,
+          transaction.id,
+        );
+
+        await this.transactionEventWriter.createCompletedEvent({
+          tx,
+          actorId: userId,
+          resourceId: completedTransaction.id,
+          traceId,
+          transactionType: TransactionType.DEPOSIT,
+          referenceId,
+          amount,
+          fromAccountId: null,
+          toAccountId,
+          clientIpMasked,
+          userAgent,
+        });
+
+        return transactionMapper.toResponseDto(completedTransaction);
+      });
+
+      this.logger.log(
+        `Deposit completed: transactionId=${result.id}, toAccountId=${toAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`,
+      );
+      return result;
+    } catch (err) {
+      const fallback = await this.idempotencyChecker.resolveP2002Fallback({
+        err,
+        userId,
+        referenceId,
+        type: TransactionType.DEPOSIT,
+      });
+      if (fallback) {
+        return fallback;
+      }
+      throw err;
+    }
+  }
+
+  async createWithdraw(
+    userId: string,
+    createWithdrawRequestDto: CreateWithdrawRequestDto,
+  ): Promise<TransactionResponseDto> {
+    const { amount, referenceId, fromAccountId } = createWithdrawRequestDto;
+    const amountDecimal = new Prisma.Decimal(amount);
+    const { clientIpMasked, userAgent, traceId } = RequestContext.get();
+
+    const existing = await this.idempotencyChecker.findExisting(
+      userId,
+      referenceId,
+    );
+    const idempotentResult = this.idempotencyChecker.resolveExistingOrThrow({
+      existing,
+      referenceId,
+      userId,
+      type: TransactionType.WITHDRAW,
+    });
+    if (idempotentResult) {
+      return idempotentResult;
+    }
+
+    try {
+      const result = (await this.prisma.$transaction(async (tx) => {
+        const account = await this.accountValidator.getAccountOrThrow(
+          tx,
+          fromAccountId,
+          'Withdraw',
+        );
+        this.accountValidator.ensureOwnedByUserOrThrow(
+          account.customerId,
+          userId,
+          'Withdraw',
+          fromAccountId,
+        );
+        this.accountValidator.ensureActiveOrThrow(
+          account.status,
+          userId,
+          'Withdraw',
+          fromAccountId,
+          'Account is not active',
+        );
+        this.accountValidator.ensureSufficientBalanceOrThrow(
+          account.balance,
+          amountDecimal,
+          userId,
+          'Withdraw',
+          fromAccountId,
+          amount,
+          'Account balance not enough',
+        );
+
+        const fraudResult = await this.fraudService.evaluateWithdraw({
+          scope: 'WITHDRAW',
+          userId,
+          referenceId,
+          fromAccountId,
+          amount: amountDecimal,
+        });
+
+        if (fraudResult.decision === 'REJECT') {
+          const rejectedTransaction =
+            await this.transactionRepository.createRejectedTransaction({
+              tx,
+              type: TransactionType.WITHDRAW,
+              actorCustomerId: userId,
+              fromAccountId,
+              toAccountId: null,
+              amount,
+              referenceId,
+              fraudDecision: fraudResult.decision,
+              fraudReason: fraudResult.reason,
+            });
+
+          await this.transactionEventWriter.createFailedFraudEvent({
+            tx,
+            actorId: userId,
+            resourceId: rejectedTransaction.id,
+            traceId,
+            transactionType: TransactionType.WITHDRAW,
+            referenceId,
+            amount,
+            fromAccountId,
+            toAccountId: null,
+            fraudRule: fraudResult.reason,
+            clientIpMasked,
+            userAgent,
+          });
+
+          return { kind: 'REJECT', fraudReason: fraudResult.reason };
+        }
+
+        const transaction =
+          await this.transactionRepository.createPendingTransaction({
+            tx,
+            type: TransactionType.WITHDRAW,
+            actorCustomerId: userId,
+            fromAccountId,
+            toAccountId: null,
+            amount,
+            referenceId,
+          });
+
+        await this.transactionRepository.decrementBalance(
+          tx,
+          fromAccountId,
+          amount,
+        );
+        const completedTransaction = await this.transactionRepository.markCompleted(
+          tx,
+          transaction.id,
+        );
+
+        await this.transactionEventWriter.createCompletedEvent({
+          tx,
+          actorId: userId,
+          resourceId: completedTransaction.id,
+          traceId,
+          transactionType: TransactionType.WITHDRAW,
+          referenceId,
+          amount,
+          fromAccountId,
+          toAccountId: null,
+          clientIpMasked,
+          userAgent,
+        });
+
         return {
-          actorId: params.actorId,
-          resourceId: params.resourceId,
-          traceId: params.traceId,
-          outcome: params.outcome,
-          reasonCode: params.reasonCode,
-          metadata: params.metadata,
+          kind: 'SUCCESS',
+          dto: transactionMapper.toResponseDto(completedTransaction),
         };
+      })) as WithdrawTxResult;
+
+      if (result.kind === 'REJECT') {
+        throw new BadRequestException(
+          getFraudRejectionMessage(TransactionType.WITHDRAW, result.fraudReason),
+        );
       }
 
-    async createDeposit(userId: string, createDepositRequestDto: CreateDepositRequestDto): Promise<TransactionResponseDto> {
-        const { amount, referenceId, toAccountId } = createDepositRequestDto;
-        const { clientIpMasked, userAgent, traceId } = RequestContext.get();
+      this.logger.log(
+        `Withdraw completed: transactionId=${result.dto.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`,
+      );
+      return result.dto;
+    } catch (err) {
+      const fallback = await this.idempotencyChecker.resolveP2002Fallback({
+        err,
+        userId,
+        referenceId,
+        type: TransactionType.WITHDRAW,
+      });
+      if (fallback) {
+        return fallback;
+      }
+      throw err;
+    }
+  }
 
-        const existing = await this.prisma.transaction.findFirst({
-            where: { actorCustomerId: userId, referenceId },
+  async createTransfer(
+    userId: string,
+    createTransferRequestDto: CreateTransferRequestDto,
+  ): Promise<TransactionResponseDto> {
+    const { amount, referenceId, toAccountId, fromAccountId } =
+      createTransferRequestDto;
+    const amountDecimal = new Prisma.Decimal(amount);
+    const { clientIpMasked, userAgent, traceId } = RequestContext.get();
+
+    const existing = await this.idempotencyChecker.findExisting(
+      userId,
+      referenceId,
+    );
+    const idempotentResult = this.idempotencyChecker.resolveExistingOrThrow({
+      existing,
+      referenceId,
+      userId,
+      type: TransactionType.TRANSFER,
+    });
+    if (idempotentResult) {
+      return idempotentResult;
+    }
+
+    try {
+      const result = (await this.prisma.$transaction(async (tx) => {
+        const fromAccount = await this.accountValidator.getAccountOrThrow(
+          tx,
+          fromAccountId,
+          'Transfer',
+        );
+        await this.accountValidator.getAccountOrThrow(tx, toAccountId, 'Transfer');
+
+        this.accountValidator.ensureOwnedByUserOrThrow(
+          fromAccount.customerId,
+          userId,
+          'Transfer',
+          fromAccountId,
+        );
+        this.accountValidator.ensureActiveOrThrow(
+          fromAccount.status,
+          userId,
+          'Transfer',
+          fromAccountId,
+          'From account is not active',
+        );
+        this.accountValidator.ensureSufficientBalanceOrThrow(
+          fromAccount.balance,
+          amountDecimal,
+          userId,
+          'Transfer',
+          fromAccountId,
+          amount,
+          'Insufficient balance',
+        );
+
+        const fraudResult = await this.fraudService.evaluateTransfer({
+          userId,
+          fromAccountId,
+          toAccountId,
+          amount: amountDecimal,
+          referenceId,
+          scope: 'TRANSFER',
         });
-        if (existing && existing.status === TransactionStatus.COMPLETED) {
-            this.logger.log(`Deposit idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
-            return transactionMapper.toResponseDto(existing);
-        }
 
-        try {
-            const result = await this.prisma.$transaction(async (tx) => {
-
-                const account = await tx.account.findUnique({
-                    where: { id: toAccountId }
-                });
-                if (!account) {
-                    this.logger.warn(`Deposit: account not found toAccountId=${toAccountId}, user=${userId}`);
-                    throw new NotFoundException('Account not found');
-                }
-                if (account.customerId !== userId) {
-                    this.logger.warn(`Deposit: forbidden, toAccountId=${toAccountId} not owned by user=${userId}`);
-                    throw new ForbiddenException('Account not found');
-                }
-                if (account.status !== AccountStatus.ACTIVE) {
-                    this.logger.warn(`Deposit: account not active toAccountId=${toAccountId}, status=${account.status}, user=${userId}`);
-                    throw new BadRequestException('Account is not active');
-                }
-
-
-                const transaction = await tx.transaction.create({
-                    data: {
-                        type: TransactionType.DEPOSIT,
-                        actorCustomerId: userId,
-                        fromAccountId: null,
-                        toAccountId,
-                        amount,
-                        referenceId,
-                        status: TransactionStatus.PENDING,
-                    },
-                });
-
-                await tx.account.update({
-                    where: { id: toAccountId },
-                    data: {
-                        balance: { increment: amount },
-                    },
-                });
-
-                const completedTransaction = await tx.transaction.update({
-                    where: { id: transaction.id },
-                    data: {
-                        status: TransactionStatus.COMPLETED,
-                    },
-                });
-
-                await tx.event.create({
-                    data: {
-                      type: EventType.TRANSACTION_COMPLETED,
-                      payload: this.buildTransactionEventPayload({
-                        actorId: userId,
-                        resourceId: completedTransaction.id,
-                        traceId: traceId ?? 'missing-trace-id',
-                        outcome: 'SUCCESS',
-                        metadata: {
-                          transactionType: TransactionType.DEPOSIT,
-                          referenceId,
-                          amount,
-                          fromAccountId: null,
-                          toAccountId,
-                          clientIpMasked,
-                          userAgent,
-                        },
-                      }),
-                      status: EventStatus.PENDING,
-                    },
-                  });
-
-                return transactionMapper.toResponseDto(completedTransaction);
+        if (fraudResult.decision === 'REJECT') {
+          const rejectedTransaction =
+            await this.transactionRepository.createRejectedTransaction({
+              tx,
+              type: TransactionType.TRANSFER,
+              actorCustomerId: userId,
+              fromAccountId,
+              toAccountId,
+              amount,
+              referenceId,
+              fraudDecision: fraudResult.decision,
+              fraudReason: fraudResult.reason,
             });
-            this.logger.log(`Deposit completed: transactionId=${result.id}, toAccountId=${toAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`);
-            return result;
-        } catch (err) {
-            const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
-            if (isP2002) {
-                const byRef = await this.prisma.transaction.findFirst({
-                    where: { actorCustomerId: userId, referenceId },
-                });
-                if (byRef) {
-                    this.logger.log(`Deposit P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
-                    return transactionMapper.toResponseDto(byRef);
-                }
-            }
-            throw err;
-        }
-    }
 
-    async createWithdraw(userId: string, createWithdrawRequestDto: CreateWithdrawRequestDto): Promise<TransactionResponseDto> {
-        const { amount, referenceId, fromAccountId } = createWithdrawRequestDto;
-        const amountDecimal = new Prisma.Decimal(amount);
-        const { clientIpMasked, userAgent, traceId } = RequestContext.get();
-
-        const existing = await this.prisma.transaction.findFirst({
-            where: { actorCustomerId: userId, referenceId },
+          await this.transactionEventWriter.createFailedFraudEvent({
+            tx,
+            actorId: userId,
+            resourceId: rejectedTransaction.id,
+            traceId,
+            transactionType: TransactionType.TRANSFER,
+            referenceId,
+            amount,
+            fromAccountId,
+            toAccountId,
+            fraudRule: fraudResult.reason,
+            clientIpMasked,
+            userAgent,
           });
-          
-          if (existing) {
-            if (existing.status === TransactionStatus.COMPLETED) {
-              this.logger.log(
-                `Withdraw idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`,
-              );
-              return transactionMapper.toResponseDto(existing);
-            }
-          
-            if (
-              existing.status === TransactionStatus.REJECTED &&
-              existing.fraudDecision === 'REJECT'
-            ) {
-              this.logger.warn(
-                `Withdraw idempotent rejected: referenceId=${referenceId}, transactionId=${existing.id}, user=${userId}`,
-              );
-              throw new BadRequestException(
-                getFraudRejectionMessage(TransactionType.WITHDRAW, existing.fraudReason ?? undefined),
-              );
-            }
-          }
-        type WithdrawTxResult =
-          | { kind: 'SUCCESS'; dto: TransactionResponseDto }
-          | { kind: 'REJECT'; rejectedTransactionId: string; fraudReason?: string };
 
-        try {
-
-            const result = (await this.prisma.$transaction(async (tx) => {
-                const account = await tx.account.findUnique({
-                    where: { id: fromAccountId }
-                });
-                if (!account) {
-                    this.logger.warn(`Withdraw: account not found fromAccountId=${fromAccountId}, user=${userId}`);
-                    throw new NotFoundException('Account not found');
-                }
-                if (account.customerId !== userId) {
-                    this.logger.warn(`Withdraw: forbidden, fromAccountId=${fromAccountId} not owned by user=${userId}`);
-                    throw new ForbiddenException('Account not found');
-                }
-                if (account.status !== AccountStatus.ACTIVE) {
-                    this.logger.warn(`Withdraw: account not active fromAccountId=${fromAccountId}, status=${account.status}, user=${userId}`);
-                    throw new BadRequestException('Account is not active');
-                }
-
-                if (account.balance.lt(amountDecimal)) {
-                    this.logger.warn(`Withdraw: account balance not enough fromAccountId=${fromAccountId}, balance=${account.balance}, amount=${amount}, user=${userId}`);
-                    throw new BadRequestException('Account balance not enough');
-                }
-
-                const fraudResult = await this.fraudService.evaluateWithdraw({
-                    scope: 'WITHDRAW',
-                    userId,
-                    referenceId,
-                    fromAccountId,
-                    amount: amountDecimal,
-                  });
-                  
-                  if (fraudResult.decision === 'REJECT') {
-                    const rejectedTransaction = await tx.transaction.create({
-                      data: {
-                        type: TransactionType.WITHDRAW,
-                        actorCustomerId: userId,
-                        fromAccountId,
-                        toAccountId: null,
-                        amount,
-                        referenceId,
-                        status: TransactionStatus.REJECTED,
-                        fraudDecision: fraudResult.decision,
-                        fraudReason: fraudResult.reason,
-                      },
-                    });
-
-                    await tx.event.create({
-                      data: {
-                        type: EventType.TRANSACTION_FAILED,
-                        payload: this.buildTransactionEventPayload({
-                          actorId: userId,
-                          resourceId: rejectedTransaction.id,
-                          traceId: traceId ?? 'missing-trace-id',
-                          outcome: 'FAILURE',
-                          reasonCode: 'FRAUD_REJECTED',
-                          metadata: {
-                            transactionType: TransactionType.WITHDRAW,
-                            referenceId,
-                            amount,
-                            fromAccountId,
-                            toAccountId: null,
-                            fraudRule: fraudResult.reason,
-                            clientIpMasked,
-                            userAgent,
-                          },
-                        }),
-                        status: EventStatus.PENDING,
-                      },
-                    });
-
-                    return {
-                      kind: 'REJECT',
-                      rejectedTransactionId: rejectedTransaction.id,
-                      fraudReason: fraudResult.reason,
-                    };
-                  }
-
-                const transaction = await tx.transaction.create({
-                    data: {
-                        type: TransactionType.WITHDRAW,
-                        actorCustomerId: userId,
-                        fromAccountId,
-                        toAccountId: null,
-                        amount,
-                        referenceId,
-                        status: TransactionStatus.PENDING,
-                    },
-                });
-
-                await tx.account.update({
-                    where: { id: fromAccountId },
-                    data: {
-                        balance: { decrement: amount },
-                    },
-                });
-
-                const completedTransaction = await tx.transaction.update({
-                    where: { id: transaction.id },
-                    data: {
-                        status: TransactionStatus.COMPLETED,
-                    },
-                });
-
-                await tx.event.create({
-                    data: {
-                      type: EventType.TRANSACTION_COMPLETED,
-                      payload: this.buildTransactionEventPayload({
-                        actorId: userId,
-                        resourceId: completedTransaction.id,
-                        traceId: traceId ?? 'missing-trace-id',
-                        outcome: 'SUCCESS',
-                        metadata: {
-                          transactionType: TransactionType.WITHDRAW,
-                          referenceId,
-                          amount,
-                          fromAccountId,
-                          toAccountId: null,
-                          clientIpMasked,
-                          userAgent,
-                        },
-                      }),
-                      status: EventStatus.PENDING,
-                    },
-                  });
-                return {
-                  kind: 'SUCCESS',
-                  dto: transactionMapper.toResponseDto(completedTransaction),
-                };
-
-
-
-            })) as WithdrawTxResult;
-            if (result.kind === 'REJECT') {
-              throw new BadRequestException(
-                getFraudRejectionMessage(TransactionType.WITHDRAW, result.fraudReason),
-              );
-            }
-            this.logger.log(`Withdraw completed: transactionId=${result.dto.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`);
-            return result.dto;
-
-
-        } catch (err) {
-            const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
-            if (isP2002) {
-                const byRef = await this.prisma.transaction.findFirst({
-                    where: { actorCustomerId: userId, referenceId },
-                });
-                if (byRef) {
-                    this.logger.log(`Withdraw P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
-                    return transactionMapper.toResponseDto(byRef);
-                }
-            }
-            throw err;
+          return { kind: 'REJECT', fraudReason: fraudResult.reason };
         }
-    }
 
-    async createTransfer(userId: string, createTransferRequestDto: CreateTransferRequestDto): Promise<TransactionResponseDto> {
+        const transaction =
+          await this.transactionRepository.createPendingTransaction({
+            tx,
+            type: TransactionType.TRANSFER,
+            actorCustomerId: userId,
+            fromAccountId,
+            toAccountId,
+            amount,
+            referenceId,
+          });
 
-        const { amount, referenceId, toAccountId, fromAccountId } = createTransferRequestDto;
-        const amountDecimal = new Prisma.Decimal(amount);
-        const { clientIpMasked, userAgent, traceId } = RequestContext.get();
+        await this.transactionRepository.decrementBalance(
+          tx,
+          fromAccountId,
+          amount,
+        );
+        await this.transactionRepository.incrementBalance(tx, toAccountId, amount);
 
+        const completedTransaction = await this.transactionRepository.markCompleted(
+          tx,
+          transaction.id,
+        );
 
-        const existing = await this.prisma.transaction.findFirst({
-            where: { actorCustomerId: userId, referenceId },
+        await this.transactionEventWriter.createCompletedEvent({
+          tx,
+          actorId: userId,
+          resourceId: completedTransaction.id,
+          traceId,
+          transactionType: TransactionType.TRANSFER,
+          referenceId,
+          amount,
+          fromAccountId,
+          toAccountId,
+          clientIpMasked,
+          userAgent,
         });
-        if (existing) {
-            if (existing.status === TransactionStatus.COMPLETED) {
-                this.logger.log(`Transfer idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
-                return transactionMapper.toResponseDto(existing);
-            }
-            if (existing.status === TransactionStatus.REJECTED && existing.fraudDecision === 'REJECT') {
-                this.logger.warn(`Transfer idempotent rejected: referenceId=${referenceId}, transactionId=${existing.id}, user=${userId}`);
-                throw new BadRequestException(
-                  getFraudRejectionMessage(TransactionType.TRANSFER, existing.fraudReason ?? undefined),
-                );
-            }
-        }
-        type TransferTxResult =
-          | { kind: 'SUCCESS'; dto: TransactionResponseDto }
-          | { kind: 'REJECT'; rejectedTransactionId: string; fraudReason?: string };
 
-        try {
+        return {
+          kind: 'SUCCESS',
+          dto: transactionMapper.toResponseDto(completedTransaction),
+        };
+      })) as TransferTxResult;
 
-            const result = (await this.prisma.$transaction(async (tx) => {
+      if (result.kind === 'REJECT') {
+        throw new BadRequestException(
+          getFraudRejectionMessage(TransactionType.TRANSFER, result.fraudReason),
+        );
+      }
 
-                const [fromAccount, toAccount] = await Promise.all([
-                    tx.account.findUnique({ where: { id: fromAccountId } }),
-                    tx.account.findUnique({ where: { id: toAccountId } }),
-                ]);
-                if (!fromAccount) {
-                    this.logger.warn(`Transfer: account not found fromAccountId=${fromAccountId}, user=${userId}`);
-                    throw new NotFoundException('Account not found');
-                }
-                if (!toAccount) {
-                    this.logger.warn(`Transfer: account not found toAccountId=${toAccountId}, user=${userId}`);
-                    throw new NotFoundException('Account not found');
-                }
-
-                if (fromAccount.customerId !== userId) {
-                    this.logger.warn(`Transfer: forbidden, fromAccountId=${fromAccountId} not owned by user=${userId}`);
-                    throw new ForbiddenException('Account not found');
-                }
-
-                if (fromAccount.status !== AccountStatus.ACTIVE) {
-                    this.logger.warn(`Transfer: from account not active fromAccountId=${fromAccountId}, status=${fromAccount.status}, user=${userId}`);
-                    throw new BadRequestException('From account is not active');
-                }
-
-                if (fromAccount.balance.lt(amountDecimal)) {
-                    this.logger.warn(`Transfer: insufficient funds, balance=${fromAccount.balance}, amount=${amount}`);
-                    throw new BadRequestException('Insufficient balance');
-                }
-
-                const fraudResult = await this.fraudService.evaluateTransfer({
-                    userId,
-                    fromAccountId,
-                    toAccountId,
-                    amount: amountDecimal,
-                    referenceId,
-                    scope: 'TRANSFER',
-                });
-
-                if (fraudResult.decision === 'REJECT') {
-                    const rejectedTransaction = await tx.transaction.create({
-                        data: {
-                            type: TransactionType.TRANSFER,
-                            actorCustomerId: userId,
-                            fromAccountId,
-                            toAccountId,
-                            amount,
-                            referenceId,
-                            status: TransactionStatus.REJECTED,
-                            fraudDecision: fraudResult.decision,
-                            fraudReason: fraudResult.reason,
-                        },
-                    });
-
-                    await tx.event.create({
-                        data: {
-                            type: EventType.TRANSACTION_FAILED,
-                            payload: this.buildTransactionEventPayload({
-                                actorId: userId,
-                                resourceId: rejectedTransaction.id,
-                                traceId: traceId ?? 'missing-trace-id',
-                                outcome: 'FAILURE',
-                                reasonCode: 'FRAUD_REJECTED',
-                                metadata: {
-                                    transactionType: TransactionType.TRANSFER,
-                                    referenceId,
-                                    amount,
-                                    fromAccountId,
-                                    toAccountId,
-                                    fraudRule: fraudResult.reason,
-                                    clientIpMasked,
-                                    userAgent,
-                                },
-                            }),
-                            status: EventStatus.PENDING,
-                        },
-                    });
-
-                    return {
-                        kind: 'REJECT',
-                        rejectedTransactionId: rejectedTransaction.id,
-                        fraudReason: fraudResult.reason,
-                    };
-                }
-
-                const transaction = await tx.transaction.create({
-                    data: {
-                        type: TransactionType.TRANSFER,
-                        actorCustomerId: userId,
-                        fromAccountId,
-                        toAccountId,
-                        amount,
-                        referenceId,
-                        status: TransactionStatus.PENDING,
-                    },
-                });
-
-                await tx.account.update({
-                    where: { id: fromAccountId },
-                    data: {
-                        balance: { decrement: amount },
-                    },
-                });
-                await tx.account.update({
-                    where: { id: toAccountId },
-                    data: {
-                        balance: { increment: amount },
-                    },
-                });
-                const completedTransaction = await tx.transaction.update({
-                    where: { id: transaction.id },
-                    data: {
-                        status: TransactionStatus.COMPLETED,
-                    },
-                });
-                await tx.event.create({
-                    data: {
-                      type: EventType.TRANSACTION_COMPLETED,
-                      payload: this.buildTransactionEventPayload({
-                        actorId: userId,
-                        resourceId: completedTransaction.id,
-                        traceId: traceId ?? 'missing-trace-id',
-                        outcome: 'SUCCESS',
-                        metadata: {
-                          transactionType: TransactionType.TRANSFER,
-                          referenceId,
-                          amount,
-                          fromAccountId,
-                          toAccountId,
-                          clientIpMasked,
-                          userAgent,
-                        },
-                      }),
-                      status: EventStatus.PENDING,
-                    },
-                  });
-                return {
-                    kind: 'SUCCESS',
-                    dto: transactionMapper.toResponseDto(completedTransaction),
-                };
-            })) as TransferTxResult;
-            if (result.kind === 'REJECT') {
-                throw new BadRequestException(
-                  getFraudRejectionMessage(TransactionType.TRANSFER, result.fraudReason),
-                );
-            }
-            this.logger.log(`Transfer completed: txId=${result.dto.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`);
-            return result.dto;
-        }
-        catch (err) {
-            const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
-            if (isP2002) {
-                const byRef = await this.prisma.transaction.findFirst({
-                    where: { actorCustomerId: userId, referenceId },
-                });
-                if (byRef) {
-                    this.logger.log(`Transfer P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
-                    return transactionMapper.toResponseDto(byRef);
-                }
-            }
-            throw err;
-        }
-
-
+      this.logger.log(
+        `Transfer completed: txId=${result.dto.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`,
+      );
+      return result.dto;
+    } catch (err) {
+      const fallback = await this.idempotencyChecker.resolveP2002Fallback({
+        err,
+        userId,
+        referenceId,
+        type: TransactionType.TRANSFER,
+      });
+      if (fallback) {
+        return fallback;
+      }
+      throw err;
     }
+  }
 }
