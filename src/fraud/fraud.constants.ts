@@ -1,0 +1,3 @@
+export const TRANSFER_FRAUD_RULES = Symbol('TRANSFER_FRAUD_RULES');
+export const WITHDRAW_FRAUD_RULES = Symbol('WITHDRAW_FRAUD_RULES');
+
