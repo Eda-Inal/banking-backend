@@ -13,6 +13,7 @@ import { RedisService } from '../../redis/redis.service';
 export type IdempotencyRequest = Request & {
   idempotencyKey?: string;
   idempotencyReferenceId?: string;
+  idempotencyOperation?: string;
 };
 
 const KEY_PREFIX = 'transactions:idempotency:';
@@ -41,6 +42,12 @@ export class TransactionsIdempotencyGuard implements CanActivate {
     return fromBody || undefined;
   }
 
+  private extractOperation(request: Request): string {
+    const path = request.path ?? '';
+    const parts = path.split('/').filter(Boolean);
+    return parts[parts.length - 1] ?? 'unknown';
+  }
+
   async canActivate(context: ExecutionContext): Promise<boolean> {
     try {
       const request = context
@@ -56,8 +63,9 @@ export class TransactionsIdempotencyGuard implements CanActivate {
       if (!referenceId) {
         throw new BadRequestException('Missing referenceId');
       }
+      const operation = this.extractOperation(request);
 
-      const key = `${KEY_PREFIX}${userId}:${referenceId}`;
+      const key = `${KEY_PREFIX}${userId}:${operation}:${referenceId}`;
       const client = this.redis.getClient();
 
       const ok = await client.set(
@@ -71,6 +79,7 @@ export class TransactionsIdempotencyGuard implements CanActivate {
       if (ok === 'OK') {
         request.idempotencyKey = key;
         request.idempotencyReferenceId = referenceId;
+        request.idempotencyOperation = operation;
         return true;
       }
       
@@ -79,6 +88,7 @@ export class TransactionsIdempotencyGuard implements CanActivate {
       if (state === 'done') {
         request.idempotencyKey = key;
         request.idempotencyReferenceId = referenceId;
+        request.idempotencyOperation = operation;
         return true;
       }
       

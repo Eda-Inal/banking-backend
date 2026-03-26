@@ -45,6 +45,7 @@ export class TransactionsService {
 
     const existing = await this.idempotencyChecker.findExisting(
       userId,
+      TransactionType.DEPOSIT,
       referenceId,
     );
     const idempotentResult = this.idempotencyChecker.resolveExistingOrThrow({
@@ -140,6 +141,7 @@ export class TransactionsService {
 
     const existing = await this.idempotencyChecker.findExisting(
       userId,
+      TransactionType.WITHDRAW,
       referenceId,
     );
     const idempotentResult = this.idempotencyChecker.resolveExistingOrThrow({
@@ -298,6 +300,7 @@ export class TransactionsService {
 
     const existing = await this.idempotencyChecker.findExisting(
       userId,
+      TransactionType.TRANSFER,
       referenceId,
     );
     const idempotentResult = this.idempotencyChecker.resolveExistingOrThrow({

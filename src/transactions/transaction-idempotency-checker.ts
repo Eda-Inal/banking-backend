@@ -11,9 +11,13 @@ export class TransactionIdempotencyChecker {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async findExisting(userId: string, referenceId: string) {
+  async findExisting(
+    userId: string,
+    type: TransactionType,
+    referenceId: string,
+  ) {
     return this.prisma.transaction.findFirst({
-      where: { actorCustomerId: userId, referenceId },
+      where: { actorCustomerId: userId, type, referenceId },
     });
   }
 
@@ -61,7 +65,7 @@ export class TransactionIdempotencyChecker {
       (err as { code?: string }).code === 'P2002';
     if (!isP2002) return null;
 
-    const byRef = await this.findExisting(userId, referenceId);
+    const byRef = await this.findExisting(userId, type, referenceId);
     if (!byRef) return null;
 
     this.logger.log(

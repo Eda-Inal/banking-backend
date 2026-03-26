@@ -149,7 +149,7 @@ model Transaction {
   @@index([fromAccountId])
   @@index([toAccountId])
   @@index([actorCustomerId])
-  @@unique([actorCustomerId, referenceId])
+  @@unique([actorCustomerId, type, referenceId])
 }
 
 model AuditLog {
