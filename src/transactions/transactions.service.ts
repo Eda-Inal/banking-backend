@@ -40,9 +40,9 @@ export class TransactionsService {
         const { amount, referenceId, toAccountId } = createDepositRequestDto;
         const { clientIpMasked, userAgent, traceId } = RequestContext.get();
 
-        const existing = await this.prisma.transaction.findUnique({
-            where: { referenceId }
-        })
+        const existing = await this.prisma.transaction.findFirst({
+            where: { actorCustomerId: userId, referenceId },
+        });
         if (existing && existing.status === TransactionStatus.COMPLETED) {
             this.logger.log(`Deposit idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
             return transactionMapper.toResponseDto(existing);
@@ -71,6 +71,7 @@ export class TransactionsService {
                 const transaction = await tx.transaction.create({
                     data: {
                         type: TransactionType.DEPOSIT,
+                        actorCustomerId: userId,
                         fromAccountId: null,
                         toAccountId,
                         amount,
@@ -122,7 +123,9 @@ export class TransactionsService {
         } catch (err) {
             const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
             if (isP2002) {
-                const byRef = await this.prisma.transaction.findUnique({ where: { referenceId } });
+                const byRef = await this.prisma.transaction.findFirst({
+                    where: { actorCustomerId: userId, referenceId },
+                });
                 if (byRef) {
                     this.logger.log(`Deposit P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
                     return transactionMapper.toResponseDto(byRef);
@@ -137,8 +140,8 @@ export class TransactionsService {
         const amountDecimal = new Prisma.Decimal(amount);
         const { clientIpMasked, userAgent, traceId } = RequestContext.get();
 
-        const existing = await this.prisma.transaction.findUnique({
-            where: { referenceId },
+        const existing = await this.prisma.transaction.findFirst({
+            where: { actorCustomerId: userId, referenceId },
           });
           
           if (existing) {
@@ -201,6 +204,7 @@ export class TransactionsService {
                     const rejectedTransaction = await tx.transaction.create({
                       data: {
                         type: TransactionType.WITHDRAW,
+                        actorCustomerId: userId,
                         fromAccountId,
                         toAccountId: null,
                         amount,
@@ -245,6 +249,7 @@ export class TransactionsService {
                 const transaction = await tx.transaction.create({
                     data: {
                         type: TransactionType.WITHDRAW,
+                        actorCustomerId: userId,
                         fromAccountId,
                         toAccountId: null,
                         amount,
@@ -308,7 +313,9 @@ export class TransactionsService {
         } catch (err) {
             const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
             if (isP2002) {
-                const byRef = await this.prisma.transaction.findUnique({ where: { referenceId } });
+                const byRef = await this.prisma.transaction.findFirst({
+                    where: { actorCustomerId: userId, referenceId },
+                });
                 if (byRef) {
                     this.logger.log(`Withdraw P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
                     return transactionMapper.toResponseDto(byRef);
@@ -325,9 +332,9 @@ export class TransactionsService {
         const { clientIpMasked, userAgent, traceId } = RequestContext.get();
 
 
-        const existing = await this.prisma.transaction.findUnique({
-            where: { referenceId }
-        })
+        const existing = await this.prisma.transaction.findFirst({
+            where: { actorCustomerId: userId, referenceId },
+        });
         if (existing) {
             if (existing.status === TransactionStatus.COMPLETED) {
                 this.logger.log(`Transfer idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`);
@@ -389,6 +396,7 @@ export class TransactionsService {
                     const rejectedTransaction = await tx.transaction.create({
                         data: {
                             type: TransactionType.TRANSFER,
+                            actorCustomerId: userId,
                             fromAccountId,
                             toAccountId,
                             amount,
@@ -433,6 +441,7 @@ export class TransactionsService {
                 const transaction = await tx.transaction.create({
                     data: {
                         type: TransactionType.TRANSFER,
+                        actorCustomerId: userId,
                         fromAccountId,
                         toAccountId,
                         amount,
@@ -496,7 +505,9 @@ export class TransactionsService {
         catch (err) {
             const isP2002 = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
             if (isP2002) {
-                const byRef = await this.prisma.transaction.findUnique({ where: { referenceId } });
+                const byRef = await this.prisma.transaction.findFirst({
+                    where: { actorCustomerId: userId, referenceId },
+                });
                 if (byRef) {
                     this.logger.log(`Transfer P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`);
                     return transactionMapper.toResponseDto(byRef);

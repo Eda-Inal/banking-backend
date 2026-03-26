@@ -67,14 +67,25 @@ export class TransactionsIdempotencyGuard implements CanActivate {
         IN_FLIGHT_TTL_SECONDS,
         'NX',
       );
-
-      if (ok !== 'OK') {
-        throw new ConflictException('Duplicate request');
+      
+      if (ok === 'OK') {
+        request.idempotencyKey = key;
+        request.idempotencyReferenceId = referenceId;
+        return true;
       }
-
-      request.idempotencyKey = key;
-      request.idempotencyReferenceId = referenceId;
-      return true;
+      
+      const state = await client.get(key);
+      
+      if (state === 'done') {
+        request.idempotencyKey = key;
+        request.idempotencyReferenceId = referenceId;
+        return true;
+      }
+      
+      if (state === 'in-flight') {
+        throw new ConflictException('Duplicate request in progress');
+      }
+      throw new ConflictException('Duplicate request');
     } catch (err) {
       if (err instanceof HttpException) {
         throw err;

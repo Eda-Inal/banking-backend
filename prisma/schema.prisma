@@ -78,6 +78,7 @@ model Customer {
   accounts  Account[]
   audit AuditLog[]
   refreshTokens RefreshToken[]
+  initiatedTransactions Transaction[] @relation("TransactionActor")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -130,6 +131,9 @@ model Account {
 model Transaction {
   id            String             @id @default(uuid()) @db.Uuid
   type          TransactionType
+  actorCustomerId String             @map("actor_customer_id") @db.Uuid
+  actorCustomer   Customer           @relation("TransactionActor", fields: [actorCustomerId], references: [id])
+
   fromAccountId String?            @map("from_account") @db.Uuid
   fromAccount   Account?           @relation("FromAccount", fields: [fromAccountId], references: [id], onDelete: SetNull)
   toAccountId   String?            @map("to_account") @db.Uuid
@@ -138,12 +142,14 @@ model Transaction {
   status        TransactionStatus  @default(PENDING)
   fraudDecision FraudDecision?
   fraudReason   String?
-  referenceId   String             @map("reference_id") @unique
+  referenceId   String             @map("reference_id") 
   createdAt     DateTime           @default(now()) @map("created_at")
 
   @@map("transactions")
   @@index([fromAccountId])
   @@index([toAccountId])
+  @@index([actorCustomerId])
+  @@unique([actorCustomerId, referenceId])
 }
 
 model AuditLog {
