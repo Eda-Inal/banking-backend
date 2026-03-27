@@ -115,6 +115,8 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RabbitMqConsumer.name);
   private readonly consumerName = 'banking-backend';
   private readonly claimTtlMs: number;
+  private readonly prefetchCount: number;
+  private readonly maxRetries: number;
   private consumerTag: string | null = null;
   private bootstrapTimer: NodeJS.Timeout | null = null;
   private readonly metrics: ConsumerMetrics = {
@@ -134,6 +136,14 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
     this.claimTtlMs = this.parsePositiveInt(
       this.config.get<string>(CONFIG_KEYS.RABBITMQ_CONSUMER_CLAIM_TTL_MS),
       300000,
+    );
+    this.prefetchCount = this.parsePositiveInt(
+      this.config.get<string>(CONFIG_KEYS.RABBITMQ_CONSUMER_PREFETCH),
+      10,
+    );
+    this.maxRetries = this.parsePositiveInt(
+      this.config.get<string>(CONFIG_KEYS.RABBITMQ_CONSUMER_MAX_RETRIES),
+      5,
     );
   }
 
@@ -202,15 +212,32 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
         );
       }
       const messageId = msg.properties.messageId ?? 'unknown';
-      const requeue = this.isTransientError(error);
+      const isTransient = this.isTransientError(error);
+      const currentAttempts = this.getAttempts(msg);
+      const nextAttempts = currentAttempts + 1;
+
+      if (isTransient && nextAttempts <= this.maxRetries) {
+        const republished = this.republishForRetry(channel, msg, nextAttempts);
+        if (republished) {
+          this.metrics.requeued += 1;
+          channel.ack(msg);
+          this.logger.warn(
+            `Consumer retry scheduled messageId=${messageId} attempt=${nextAttempts}/${this.maxRetries} error=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return;
+        }
+      }
+
+      const requeue = false;
       this.metrics.nacked += 1;
-      if (requeue) this.metrics.requeued += 1;
-      channel.nack(msg, false, requeue);
       this.logger.warn(
-        `Consumer nack messageId=${messageId} requeue=${requeue} error=${
+        `Consumer nack messageId=${messageId} requeue=${requeue} attempts=${nextAttempts}/${this.maxRetries} error=${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      channel.nack(msg, false, requeue);
     }
   }
 
@@ -223,6 +250,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
       const queue =
         this.config.get<string>(CONFIG_KEYS.RABBITMQ_EVENTS_QUEUE) ??
         'banking.events.q';
+      await channel.prefetch(this.prefetchCount);
 
       const consumeOk = await channel.consume(
         queue,
@@ -237,7 +265,9 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
         clearInterval(this.bootstrapTimer);
         this.bootstrapTimer = null;
       }
-      this.logger.log(`RabbitMQ consumer started queue=${queue}`);
+      this.logger.log(
+        `RabbitMQ consumer started queue=${queue} prefetch=${this.prefetchCount}`,
+      );
     } catch (error) {
       this.logger.warn(
         `RabbitMQ consumer bootstrap retry: ${
@@ -452,6 +482,33 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
 
   getMetrics(): ConsumerMetrics {
     return { ...this.metrics };
+  }
+
+  private getAttempts(msg: ConsumeMessage): number {
+    const raw = msg.properties.headers?.['x-attempts'];
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+      return Math.floor(raw);
+    }
+    return 0;
+  }
+
+  private republishForRetry(
+    channel: Channel,
+    msg: ConsumeMessage,
+    attempts: number,
+  ): boolean {
+    const exchange = msg.fields.exchange;
+    const routingKey = msg.fields.routingKey;
+    if (!exchange || !routingKey) return false;
+
+    const headers = { ...(msg.properties.headers ?? {}), 'x-attempts': attempts };
+    return channel.publish(exchange, routingKey, msg.content, {
+      ...msg.properties,
+      headers,
+      persistent: true,
+      messageId: msg.properties.messageId,
+      timestamp: Date.now(),
+    });
   }
 
   private parsePositiveInt(value: string | undefined, fallback: number): number {
