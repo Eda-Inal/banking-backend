@@ -65,6 +65,11 @@ enum FraudDecision {
   REJECT
 }
 
+enum ProcessedMessageStatus {
+  CLAIMED
+  COMPLETED
+  FAILED
+}
 
 model Customer {
   id        String   @id @default(uuid()) @db.Uuid
@@ -198,13 +203,19 @@ model Event {
 }
 
 model ProcessedMessage {
-  id         String   @id @default(uuid()) @db.Uuid
-  messageId  String   @map("message_id")
-  eventType  String   @map("event_type")
-  consumer   String
-  processedAt DateTime @default(now()) @map("processed_at")
+  id          String                 @id @default(uuid()) @db.Uuid
+  messageId   String                 @map("message_id")
+  eventType   String                 @map("event_type")
+  consumer    String
+  status      ProcessedMessageStatus @default(CLAIMED)
+  claimedAt   DateTime               @default(now()) @map("claimed_at")
+  completedAt DateTime?              @map("completed_at")
+  lastError   String?                @map("last_error")
+  processedAt DateTime               @default(now()) @map("processed_at")
+  updatedAt   DateTime               @updatedAt @map("updated_at")
 
   @@map("processed_messages")
   @@unique([consumer, messageId])
+  @@index([consumer, status])
   @@index([processedAt])
 }

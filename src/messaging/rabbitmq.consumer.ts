@@ -114,6 +114,7 @@ function validateTransactionEventPayload(payload: unknown): TransactionEventPayl
 export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RabbitMqConsumer.name);
   private readonly consumerName = 'banking-backend';
+  private readonly claimTtlMs: number;
   private consumerTag: string | null = null;
   private bootstrapTimer: NodeJS.Timeout | null = null;
   private readonly metrics: ConsumerMetrics = {
@@ -129,7 +130,12 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly rabbit: RabbitMqConnection,
-  ) {}
+  ) {
+    this.claimTtlMs = this.parsePositiveInt(
+      this.config.get<string>(CONFIG_KEYS.RABBITMQ_CONSUMER_CLAIM_TTL_MS),
+      300000,
+    );
+  }
 
   async onModuleInit(): Promise<void> {
     await this.tryStartConsumer();
@@ -163,6 +169,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     if (!msg) return;
 
+    let claimedMessageId: string | null = null;
     try {
       const parsed = this.parseMessage(msg.content);
       const messageId = msg.properties.messageId ?? parsed.eventId;
@@ -172,26 +179,28 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
         throw new PermanentConsumerError('messageId is missing');
       }
 
-      const alreadyProcessed = await this.isAlreadyProcessed(messageId);
-      if (alreadyProcessed) {
+      const claimed = await this.claimMessage(messageId, eventType);
+      if (!claimed) {
         this.metrics.duplicates += 1;
+        this.logger.warn(`Consumer duplicate-skipped messageId=${messageId}`);
         channel.ack(msg);
         return;
       }
+      claimedMessageId = messageId;
 
       await this.dispatchEvent(parsed);
-      const marked = await this.markProcessed(messageId, eventType);
-      if (!marked) {
-        this.metrics.duplicates += 1;
-        this.logger.warn(
-          `Consumer duplicate-detected-after-dispatch messageId=${messageId}`,
-        );
-      }
+      await this.markCompleted(messageId);
       this.metrics.consumed += 1;
       this.metrics.lastMessageAt = new Date().toISOString();
       channel.ack(msg);
       this.logger.log(`Consumer ack eventType=${eventType} messageId=${messageId}`);
     } catch (error) {
+      if (claimedMessageId) {
+        await this.markFailed(
+          claimedMessageId,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
       const messageId = msg.properties.messageId ?? 'unknown';
       const requeue = this.isTransientError(error);
       this.metrics.nacked += 1;
@@ -258,31 +267,105 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async markProcessed(
+  private async claimMessage(
     messageId: string,
     eventType: string,
   ): Promise<boolean> {
     const id = randomUUID();
-    const inserted = await this.prisma.$executeRaw`
-      INSERT INTO "processed_messages" ("id", "message_id", "event_type", "consumer", "processed_at")
-      VALUES (${id}::uuid, ${messageId}, ${eventType}, ${this.consumerName}, NOW())
-      ON CONFLICT ("consumer", "message_id") DO NOTHING
+    const rows = await this.prisma.$queryRaw<Array<{ claimed: number }>>`
+      WITH inserted AS (
+        INSERT INTO "processed_messages" (
+          "id",
+          "message_id",
+          "event_type",
+          "consumer",
+          "status",
+          "claimed_at",
+          "processed_at",
+          "updated_at"
+        )
+        VALUES (
+          ${id}::uuid,
+          ${messageId},
+          ${eventType},
+          ${this.consumerName},
+          'CLAIMED'::"ProcessedMessageStatus",
+          NOW(),
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT ("consumer", "message_id") DO NOTHING
+        RETURNING 1
+      ),
+      reclaimed AS (
+        UPDATE "processed_messages"
+        SET
+          "status" = 'CLAIMED'::"ProcessedMessageStatus",
+          "event_type" = ${eventType},
+          "claimed_at" = NOW(),
+          "last_error" = NULL,
+          "updated_at" = NOW()
+        WHERE "consumer" = ${this.consumerName}
+          AND "message_id" = ${messageId}
+          AND (
+            "status" = 'FAILED'::"ProcessedMessageStatus"
+            OR (
+              "status" = 'CLAIMED'::"ProcessedMessageStatus"
+              AND "claimed_at" < NOW() - (${this.claimTtlMs} * INTERVAL '1 millisecond')
+            )
+          )
+        RETURNING 1
+      )
+      SELECT COUNT(*)::int AS claimed FROM (
+        SELECT 1 FROM inserted
+        UNION ALL
+        SELECT 1 FROM reclaimed
+      ) AS claims
     `;
 
-    return Number(inserted) > 0;
+    return Number(rows[0]?.claimed ?? 0) > 0;
   }
 
-  private async isAlreadyProcessed(messageId: string): Promise<boolean> {
-    const existing = await this.prisma.$queryRaw<Array<{ message_id: string }>>`
-      SELECT "message_id"
-      FROM "processed_messages"
+  private async markCompleted(messageId: string): Promise<void> {
+    const updated = await this.prisma.$executeRaw`
+      UPDATE "processed_messages"
+      SET
+        "status" = 'COMPLETED'::"ProcessedMessageStatus",
+        "completed_at" = NOW(),
+        "processed_at" = NOW(),
+        "updated_at" = NOW()
       WHERE "consumer" = ${this.consumerName}
         AND "message_id" = ${messageId}
-      LIMIT 1
+        AND "status" = 'CLAIMED'::"ProcessedMessageStatus"
     `;
-    return existing.length > 0;
+
+    if (Number(updated) !== 1) {
+      throw new TransientConsumerError(
+        `failed to finalize processed message as COMPLETED messageId=${messageId}`,
+      );
+    }
   }
-  
+
+  private async markFailed(messageId: string, errorMessage: string): Promise<void> {
+    try {
+      await this.prisma.$executeRaw`
+        UPDATE "processed_messages"
+        SET
+          "status" = 'FAILED'::"ProcessedMessageStatus",
+          "last_error" = ${errorMessage},
+          "updated_at" = NOW()
+        WHERE "consumer" = ${this.consumerName}
+          AND "message_id" = ${messageId}
+      `;
+    } catch (error) {
+      this.logger.error(
+        `Consumer failed to mark FAILED messageId=${messageId} error=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
 
   
   private async dispatchEvent(message: ConsumedEventMessage): Promise<void> {
@@ -369,5 +452,11 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
 
   getMetrics(): ConsumerMetrics {
     return { ...this.metrics };
+  }
+
+  private parsePositiveInt(value: string | undefined, fallback: number): number {
+    if (!value) return fallback;
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
   }
 }
