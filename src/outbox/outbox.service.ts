@@ -4,15 +4,14 @@ import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RabbitMqPublisher } from '../messaging/rabbitmq.publisher';
 import { EventStatus } from '../common/enums';
+import { BANKING_EVENT_SCHEMA_VERSION } from '../common/banking-event-schema.version';
 import { CONFIG_KEYS } from '../config/config';
-
-const SCHEMA_VERSION = '1';
 
 type OutboxPublishMessage = {
   eventId: string;
   type: string;
   occurredAt: string;
-  schemaVersion: string;
+  schemaVersion: typeof BANKING_EVENT_SCHEMA_VERSION;
   payload: unknown;
 };
 
@@ -104,7 +103,7 @@ export class OutboxService {
           eventId: evt.id,
           type: evt.type,
           occurredAt: evt.createdAt.toISOString(),
-          schemaVersion: SCHEMA_VERSION,
+          schemaVersion: BANKING_EVENT_SCHEMA_VERSION,
           payload: evt.payload,
         };
 
@@ -118,7 +117,7 @@ export class OutboxService {
             headers: {
               eventType: evt.type,
               source: 'banking-backend',
-              schemaVersion: SCHEMA_VERSION,
+              schemaVersion: BANKING_EVENT_SCHEMA_VERSION,
             },
           },
         );
