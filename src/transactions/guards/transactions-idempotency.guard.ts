@@ -8,6 +8,7 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'crypto';
 import { Request } from 'express';
 import { CONFIG_KEYS } from '../../config/config';
 import { RedisService } from '../../redis/redis.service';
@@ -16,9 +17,12 @@ export type IdempotencyRequest = Request & {
   idempotencyKey?: string;
   idempotencyReferenceId?: string;
   idempotencyOperation?: string;
+  transferUserLockKey?: string;
+  transferUserLockToken?: string;
 };
 
 const KEY_PREFIX = 'transactions:idempotency:';
+const TRANSFER_USER_LOCK_PREFIX = 'transactions:user-lock:';
 const DEFAULT_IN_FLIGHT_TTL_SECONDS = 180;
 
 @Injectable()
@@ -87,6 +91,24 @@ export class TransactionsIdempotencyGuard implements CanActivate {
       );
       
       if (ok === 'OK') {
+        if (operation === 'transfer') {
+          const transferLockKey = `${TRANSFER_USER_LOCK_PREFIX}${userId}:TRANSFER`;
+          const transferLockToken = randomUUID();
+          const lockOk = await client.set(
+            transferLockKey,
+            transferLockToken,
+            'EX',
+            inFlightTtlSeconds,
+            'NX',
+          );
+          if (lockOk !== 'OK') {
+            await client.del(key);
+            throw new ConflictException('Another transfer is already in progress');
+          }
+          request.transferUserLockKey = transferLockKey;
+          request.transferUserLockToken = transferLockToken;
+        }
+
         request.idempotencyKey = key;
         request.idempotencyReferenceId = referenceId;
         request.idempotencyOperation = operation;

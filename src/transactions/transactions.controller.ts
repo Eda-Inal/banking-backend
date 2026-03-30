@@ -17,10 +17,35 @@ import {
 @Controller('transactions')
 @UseGuards(JwtGuard)
 export class TransactionsController {
+  private static readonly RELEASE_USER_LOCK_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+
   constructor(
     private readonly transactionsService: TransactionsService,
     private readonly redis: RedisService,
   ) {}
+
+  private async releaseTransferUserLock(req: IdempotencyRequest): Promise<void> {
+    const lockKey = req.transferUserLockKey;
+    const lockToken = req.transferUserLockToken;
+    if (!lockKey || !lockToken) return;
+
+    try {
+      await this.redis.getClient().eval(
+        TransactionsController.RELEASE_USER_LOCK_LUA,
+        1,
+        lockKey,
+        lockToken,
+      );
+    } finally {
+      req.transferUserLockKey = undefined;
+      req.transferUserLockToken = undefined;
+    }
+  }
 
   @Post('deposit')
   @UseGuards(TransactionsIdempotencyGuard)
@@ -100,6 +125,8 @@ export class TransactionsController {
         }
       }
       throw err;
+    } finally {
+      await this.releaseTransferUserLock(req);
     }
   }
 }

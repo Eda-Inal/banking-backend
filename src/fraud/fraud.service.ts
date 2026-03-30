@@ -41,6 +41,32 @@ export class FraudService {
     return { decision: 'APPROVE' };
   }
 
+  async releaseTransferDailyReservation(
+    input: TransferFraudCheckInput,
+  ): Promise<void> {
+    const rulesWithRelease = this.transferRules.filter(
+      (
+        rule,
+      ): rule is TransferFraudRule & {
+        releaseReservation: (payload: TransferFraudCheckInput) => Promise<void>;
+      } =>
+        typeof (rule as { releaseReservation?: unknown }).releaseReservation ===
+        'function',
+    );
+
+    for (const rule of rulesWithRelease) {
+      try {
+        await rule.releaseReservation(input);
+      } catch (error) {
+        this.logger.warn(
+          `Transfer reservation release failed for rule=${rule.name} userId=${input.userId} referenceId=${input.referenceId} error=${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+
   async releaseWithdrawDailyReservation(
     input: WithdrawFraudCheckInput,
   ): Promise<void> {

@@ -3,7 +3,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { FraudService } from './fraud.service';
 import { RedisModule } from '../redis/redis.module';
 import { RedisService } from '../redis/redis.service';
-import { PrismaService } from '../prisma/prisma.service';
 import { CONFIG_KEYS } from '../config/config';
 import { TRANSFER_FRAUD_RULES, WITHDRAW_FRAUD_RULES } from './fraud.constants';
 import { SameAccountTransferRule } from './rules/transfer/same-account-transfer.rule';
@@ -18,11 +17,10 @@ import { DailyWithdrawLimitExceededRule } from './rules/withdraw/daily-withdraw-
   providers: [
     {
       provide: TRANSFER_FRAUD_RULES,
-      inject: [ConfigService, RedisService, PrismaService],
+      inject: [ConfigService, RedisService],
       useFactory: (
         config: ConfigService,
         redisService: RedisService,
-        prisma: PrismaService,
       ) => {
         const transferThreshold = Number(
           config.get<string>(CONFIG_KEYS.FRAUD_TRANSFER_MAX_AMOUNT) ?? '100000',
@@ -38,7 +36,7 @@ import { DailyWithdrawLimitExceededRule } from './rules/withdraw/daily-withdraw-
           new SameAccountTransferRule(),
           new TransferAmountExceededRule(transferThreshold),
           new TooManyTransfersInMinuteRule(redisService, transferPerMinuteLimit),
-          new DailyTransferLimitExceededRule(prisma, dailyTransferLimit),
+          new DailyTransferLimitExceededRule(redisService, dailyTransferLimit),
         ];
       },
     },

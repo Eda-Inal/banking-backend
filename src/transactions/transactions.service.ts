@@ -19,9 +19,7 @@ type WithdrawTxResult =
   | { kind: 'SUCCESS'; dto: TransactionResponseDto }
   | { kind: 'REJECT'; fraudReason?: string };
 
-type TransferTxResult =
-  | { kind: 'SUCCESS'; dto: TransactionResponseDto }
-  | { kind: 'REJECT'; fraudReason?: string };
+type TransferTxResult = { kind: 'SUCCESS'; dto: TransactionResponseDto };
 
 @Injectable()
 export class TransactionsService {
@@ -361,6 +359,56 @@ export class TransactionsService {
     }
 
     try {
+      const preFraudResult = await this.fraudService.evaluateTransfer({
+        userId,
+        fromAccountId,
+        toAccountId,
+        amount: amountDecimal,
+        referenceId,
+        scope: 'TRANSFER',
+      });
+
+      if (preFraudResult.decision === 'REJECT') {
+        const rejected = await this.prisma.$transaction(async (tx) => {
+          const rejectedTransaction =
+            await this.transactionRepository.createRejectedTransaction({
+              tx,
+              type: TransactionType.TRANSFER,
+              actorCustomerId: userId,
+              fromAccountId,
+              toAccountId,
+              amount,
+              referenceId,
+              fraudDecision: 'REJECT',
+              fraudReason: preFraudResult.reason,
+            });
+
+          await this.transactionEventWriter.createFailedFraudEvent({
+            tx,
+            actorId: userId,
+            resourceId: rejectedTransaction.id,
+            traceId,
+            transactionType: TransactionType.TRANSFER,
+            referenceId,
+            amount,
+            fromAccountId,
+            toAccountId,
+            fraudRule: preFraudResult.reason,
+            clientIpMasked,
+            userAgent,
+          });
+
+          return { fraudReason: preFraudResult.reason };
+        });
+
+        throw new BadRequestException(
+          getFraudRejectionMessage(
+            TransactionType.TRANSFER,
+            rejected.fraudReason,
+          ),
+        );
+      }
+
       let lastError: unknown;
       for (let attempt = 0; attempt < this.transferRetryAttempts; attempt++) {
         try {
@@ -370,7 +418,11 @@ export class TransactionsService {
           fromAccountId,
           'Transfer',
         );
-        await this.accountValidator.getAccountOrThrow(tx, toAccountId, 'Transfer');
+        const toAccount = await this.accountValidator.getAccountOrThrow(
+          tx,
+          toAccountId,
+          'Transfer',
+        );
 
         this.accountValidator.ensureOwnedByUserOrThrow(
           fromAccount.customerId,
@@ -385,50 +437,19 @@ export class TransactionsService {
           fromAccountId,
           'From account is not active',
         );
-
-        const fraudResult = await this.fraudService.evaluateTransfer(
-          {
-            userId,
-            fromAccountId,
-            toAccountId,
-            amount: amountDecimal,
-            referenceId,
-            scope: 'TRANSFER',
-          },
-          tx,
+        this.accountValidator.ensureOwnedByUserOrThrow(
+          toAccount.customerId,
+          userId,
+          'Transfer',
+          toAccountId,
         );
-
-        if (fraudResult.decision === 'REJECT') {
-          const rejectedTransaction =
-            await this.transactionRepository.createRejectedTransaction({
-              tx,
-              type: TransactionType.TRANSFER,
-              actorCustomerId: userId,
-              fromAccountId,
-              toAccountId,
-              amount,
-              referenceId,
-              fraudDecision: fraudResult.decision,
-              fraudReason: fraudResult.reason,
-            });
-
-          await this.transactionEventWriter.createFailedFraudEvent({
-            tx,
-            actorId: userId,
-            resourceId: rejectedTransaction.id,
-            traceId,
-            transactionType: TransactionType.TRANSFER,
-            referenceId,
-            amount,
-            fromAccountId,
-            toAccountId,
-            fraudRule: fraudResult.reason,
-            clientIpMasked,
-            userAgent,
-          });
-
-          return { kind: 'REJECT', fraudReason: fraudResult.reason };
-        }
+        this.accountValidator.ensureActiveOrThrow(
+          toAccount.status,
+          userId,
+          'Transfer',
+          toAccountId,
+          'To account is not active',
+        );
 
         const transaction =
           await this.transactionRepository.createPendingTransaction({
@@ -492,15 +513,6 @@ export class TransactionsService {
         };
           })) as TransferTxResult;
 
-          if (result.kind === 'REJECT') {
-            throw new BadRequestException(
-              getFraudRejectionMessage(
-                TransactionType.TRANSFER,
-                result.fraudReason,
-              ),
-            );
-          }
-
           this.logger.log(
             `Transfer completed: txId=${result.dto.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`,
           );
@@ -523,6 +535,26 @@ export class TransactionsService {
 
       throw lastError;
     } catch (err) {
+      const errorCode =
+        err &&
+        typeof err === 'object' &&
+        'code' in err &&
+        typeof (err as { code?: unknown }).code === 'string'
+          ? (err as { code?: string }).code
+          : undefined;
+      const isP2002 = errorCode === 'P2002';
+
+      if (!isP2002) {
+        await this.fraudService.releaseTransferDailyReservation({
+          userId,
+          fromAccountId,
+          toAccountId,
+          amount: amountDecimal,
+          referenceId,
+          scope: 'TRANSFER',
+        });
+      }
+
       const fallback = await this.idempotencyChecker.resolveP2002Fallback({
         err,
         userId,

@@ -1,63 +1,155 @@
 import { Prisma } from '../../../generated/prisma/client';
-import { PrismaService } from '../../../prisma/prisma.service';
+import { RedisService } from '../../../redis/redis.service';
 import { TransferFraudRule } from '../fraud-rule.interface';
 import { TransferFraudCheckInput } from '../../types/transfer-fraud-check-input.type';
 import { FraudDecisionResult } from '../../types/fraud-decision-result.type';
-import { TransactionStatus, TransactionType } from '../../../common/enums';
 
 export class DailyTransferLimitExceededRule implements TransferFraudRule {
   name = 'DAILY_TRANSFER_LIMIT_EXCEEDED';
+  private static readonly RESERVE_LUA = `
+local totalKey = KEYS[1]
+local refKey = KEYS[2]
+local amount = tonumber(ARGV[1])
+local dailyLimit = tonumber(ARGV[2])
+local totalTtlSec = tonumber(ARGV[3])
+local refTtlSec = tonumber(ARGV[4])
+
+if not amount or not dailyLimit or not totalTtlSec or not refTtlSec then
+  return {err="invalid_args"}
+end
+
+if redis.call('EXISTS', refKey) == 1 then
+  local currentTotal = tonumber(redis.call('GET', totalKey) or '0')
+  return {1, currentTotal}
+end
+
+local currentTotal = tonumber(redis.call('GET', totalKey) or '0')
+local nextTotal = currentTotal + amount
+
+if nextTotal > dailyLimit then
+  return {0, currentTotal}
+end
+
+redis.call('SET', totalKey, tostring(nextTotal), 'EX', totalTtlSec)
+redis.call('SET', refKey, tostring(amount), 'EX', refTtlSec)
+return {1, nextTotal}
+`;
+  private static readonly RELEASE_LUA = `
+local totalKey = KEYS[1]
+local refKey = KEYS[2]
+local releasedKey = KEYS[3]
+local fallbackTotalTtlSec = tonumber(ARGV[1])
+local releasedTtlSec = tonumber(ARGV[2])
+
+if not fallbackTotalTtlSec or not releasedTtlSec then
+  return {err="invalid_args"}
+end
+
+if redis.call('EXISTS', releasedKey) == 1 then
+  return {1, 0}
+end
+
+if redis.call('EXISTS', refKey) == 0 then
+  redis.call('SET', releasedKey, '1', 'EX', releasedTtlSec)
+  return {1, 0}
+end
+
+local reservedAmount = tonumber(redis.call('GET', refKey) or '0')
+local currentTotal = tonumber(redis.call('GET', totalKey) or '0')
+local nextTotal = currentTotal - reservedAmount
+if nextTotal < 0 then
+  nextTotal = 0
+end
+
+local pttl = redis.call('PTTL', totalKey)
+if pttl > 0 then
+  redis.call('PSETEX', totalKey, pttl, tostring(nextTotal))
+else
+  redis.call('SET', totalKey, tostring(nextTotal), 'EX', fallbackTotalTtlSec)
+end
+
+redis.call('DEL', refKey)
+redis.call('SET', releasedKey, '1', 'EX', releasedTtlSec)
+return {1, nextTotal}
+`;
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
     private readonly dailyLimit: number,
   ) {}
 
   async evaluate(
     input: TransferFraudCheckInput,
-    tx?: Prisma.TransactionClient,
+    _tx?: Prisma.TransactionClient,
   ): Promise<FraudDecisionResult | null> {
-    const { startOfDayUtc, endOfDayUtc } = this.getUtcDayRange();
+    const client = this.redis.getClient();
+    const { dayBucket, ttlSeconds } = this.getUtcDayMeta();
+    const totalKey = `fraud:transfer:daily:${input.userId}:${dayBucket}`;
+    const refKey = `fraud:transfer:daily:ref:${input.userId}:${dayBucket}:${input.referenceId}`;
+    const amount = input.amount.toString();
+    const refTtlSeconds = ttlSeconds + 3600;
 
-    const client = (tx ?? this.prisma) as unknown as Prisma.TransactionClient;
+    try {
+      const result = (await client.eval(
+        DailyTransferLimitExceededRule.RESERVE_LUA,
+        2,
+        totalKey,
+        refKey,
+        amount,
+        this.dailyLimit.toString(),
+        ttlSeconds.toString(),
+        refTtlSeconds.toString(),
+      )) as [number, number] | null;
 
-    const aggregate = await client.transaction.aggregate({
-      _sum: { amount: true },
-      where: {
-        type: TransactionType.TRANSFER,
-        status: TransactionStatus.COMPLETED,
-        fromAccount: {
-          customerId: input.userId,
-        },
-        createdAt: {
-          gte: startOfDayUtc,
-          lt: endOfDayUtc,
-        },
-      },
-    });
-
-    const dailyTotal = aggregate._sum.amount ?? new Prisma.Decimal(0);
-    const nextTotal = dailyTotal.plus(input.amount);
-
-    if (nextTotal.gt(this.dailyLimit)) {
+      const allowed = Array.isArray(result) ? Number(result[0]) === 1 : false;
+      if (!allowed) {
+        return {
+          decision: 'REJECT',
+          reason: this.name,
+        };
+      }
+      return null;
+    } catch {
       return {
         decision: 'REJECT',
         reason: this.name,
       };
     }
-
-    return null;
   }
 
-  private getUtcDayRange(): { startOfDayUtc: Date; endOfDayUtc: Date } {
-    const now = new Date();
-    const startOfDayUtc = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0),
+  async releaseReservation(input: TransferFraudCheckInput): Promise<void> {
+    const client = this.redis.getClient();
+    const { dayBucket, ttlSeconds } = this.getUtcDayMeta();
+    const totalKey = `fraud:transfer:daily:${input.userId}:${dayBucket}`;
+    const refKey = `fraud:transfer:daily:ref:${input.userId}:${dayBucket}:${input.referenceId}`;
+    const releasedKey = `fraud:transfer:daily:released:${input.userId}:${dayBucket}:${input.referenceId}`;
+    const releasedTtlSeconds = ttlSeconds + 3600;
+
+    await client.eval(
+      DailyTransferLimitExceededRule.RELEASE_LUA,
+      3,
+      totalKey,
+      refKey,
+      releasedKey,
+      ttlSeconds.toString(),
+      releasedTtlSeconds.toString(),
     );
+  }
+
+  private getUtcDayMeta(): { dayBucket: string; ttlSeconds: number } {
+    const now = new Date();
     const endOfDayUtc = new Date(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0),
     );
+    const ttlMs = Math.max(1000, endOfDayUtc.getTime() - now.getTime());
+    const ttlSeconds = Math.max(1, Math.ceil(ttlMs / 1000));
+    const yyyy = now.getUTCFullYear();
+    const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(now.getUTCDate()).padStart(2, '0');
 
-    return { startOfDayUtc, endOfDayUtc };
+    return {
+      dayBucket: `${yyyy}${mm}${dd}`,
+      ttlSeconds,
+    };
   }
 }
