@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RabbitMqPublisher } from '../messaging/rabbitmq.publisher';
 import { EventStatus } from '../common/enums';
@@ -13,6 +14,18 @@ type OutboxPublishMessage = {
   occurredAt: string;
   schemaVersion: string;
   payload: unknown;
+};
+
+type ClaimedEventRow = {
+  id: string;
+  type: string;
+  payload: Prisma.JsonValue;
+  retry_count: number;
+  next_retry_at: Date | null;
+  last_error: string | null;
+  published_at: Date | null;
+  created_at: Date;
+  claimed_at: Date | null;
 };
 
 type OutboxMetrics = {
@@ -30,6 +43,7 @@ export class OutboxService {
   private readonly batchSize: number;
   private readonly maxRetries: number;
   private readonly retryBaseDelayMs: number;
+  private readonly claimTtlMs: number;
   private readonly metrics: OutboxMetrics = {
     fetched: 0,
     processed: 0,
@@ -61,29 +75,29 @@ export class OutboxService {
       this.config.get<string>(CONFIG_KEYS.OUTBOX_RETRY_BASE_DELAY_MS),
       1000,
     );
+
+    this.claimTtlMs = this.parsePositiveInt(
+      this.config.get<string>(CONFIG_KEYS.OUTBOX_CLAIM_TTL_MS),
+      300000,
+    );
   }
 
-
   async processPendingEvents(): Promise<void> {
-    const events = await this.prisma.event.findMany({
-      where: {
-        OR: [
-          { status: EventStatus.PENDING },
-          {
-            status: EventStatus.FAILED,
-            nextRetryAt: { lte: new Date() },
-          },
-        ],
-      },
-      orderBy: { createdAt: 'asc' },
-      take: this.batchSize,
-    });
-
+    const events = await this.claimNextBatch();
     if (!events.length) return;
+
     this.metrics.fetched += events.length;
     this.metrics.lastRunAt = new Date().toISOString();
 
-    for (const evt of events) {
+    for (const row of events) {
+      const evt = {
+        id: row.id,
+        type: row.type,
+        payload: row.payload,
+        createdAt: row.created_at,
+        retryCount: row.retry_count,
+      };
+
       try {
         const routingKey = String(evt.type).toLowerCase();
         const message: OutboxPublishMessage = {
@@ -94,7 +108,7 @@ export class OutboxService {
           payload: evt.payload,
         };
 
-        const ok = await this.publisher.publish(
+        await this.publisher.publish(
           this.exchange,
           routingKey,
           message,
@@ -109,22 +123,25 @@ export class OutboxService {
           },
         );
 
-        if (!ok) {
-          throw new Error('Rabbit publish returned false');
-        }
-
-        await this.prisma.event.update({
-          where: { id: evt.id },
+        const finalized = await this.prisma.event.updateMany({
+          where: { id: evt.id, status: EventStatus.PUBLISHING },
           data: {
             status: EventStatus.PROCESSED,
             publishedAt: new Date(),
             lastError: null,
             nextRetryAt: null,
+            claimedAt: null,
           },
         });
-        this.metrics.processed += 1;
 
-        this.logger.log(`Outbox published event ${evt.id} (${evt.type})`);
+        if (finalized.count !== 1) {
+          this.logger.warn(
+            `Outbox finalize PROCESSED skipped (row not PUBLISHING?) eventId=${evt.id}`,
+          );
+        } else {
+          this.metrics.processed += 1;
+          this.logger.log(`Outbox published event ${evt.id} (${evt.type})`);
+        }
       } catch (error) {
         const currentRetry = evt.retryCount ?? 0;
         const nextRetryCount = currentRetry + 1;
@@ -136,25 +153,69 @@ export class OutboxService {
           ? new Date(Date.now() + this.getBackoffDelayMs(nextRetryCount))
           : null;
 
-        await this.prisma.event.update({
-          where: { id: evt.id },
+        const updated = await this.prisma.event.updateMany({
+          where: { id: evt.id, status: EventStatus.PUBLISHING },
           data: {
             status: EventStatus.FAILED,
             retryCount: nextRetryCount,
             nextRetryAt,
             lastError: error instanceof Error ? error.message : String(error),
+            claimedAt: null,
           },
         });
 
-        this.logger.warn(
-          `Outbox failed event ${evt.id} (${evt.type}) retry=${nextRetryCount}/${this.maxRetries} nextRetryAt=${nextRetryAt?.toISOString() ?? 'none'} error=${error instanceof Error ? error.message : String(error)}`,
-        );
+        if (updated.count !== 1) {
+          this.logger.warn(
+            `Outbox finalize FAILED skipped (row not PUBLISHING?) eventId=${evt.id}`,
+          );
+        } else {
+          this.logger.warn(
+            `Outbox failed event ${evt.id} (${evt.type}) retry=${nextRetryCount}/${this.maxRetries} nextRetryAt=${nextRetryAt?.toISOString() ?? 'none'} error=${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
     }
   }
 
   getMetrics(): OutboxMetrics {
     return { ...this.metrics };
+  }
+
+  private async claimNextBatch(): Promise<ClaimedEventRow[]> {
+    return this.prisma.$queryRaw<ClaimedEventRow[]>`
+      WITH candidates AS (
+        SELECT id FROM events
+        WHERE (
+          status = 'PENDING'::"EventStatus"
+          OR (
+            status = 'FAILED'::"EventStatus"
+            AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+          )
+          OR (
+            status = 'PUBLISHING'::"EventStatus"
+            AND claimed_at IS NOT NULL
+            AND claimed_at < NOW() - (INTERVAL '1 millisecond' * ${this.claimTtlMs})
+          )
+        )
+        ORDER BY created_at ASC
+        LIMIT ${this.batchSize}
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE events AS e
+      SET status = 'PUBLISHING'::"EventStatus", claimed_at = NOW()
+      FROM candidates c
+      WHERE e.id = c.id
+      RETURNING
+        e.id,
+        e.type,
+        e.payload,
+        e.retry_count,
+        e.next_retry_at,
+        e.last_error,
+        e.published_at,
+        e.created_at,
+        e.claimed_at
+    `;
   }
 
   private parsePositiveInt(value: string | undefined, fallback: number): number {

@@ -51,6 +51,7 @@ enum Action {
 
 enum EventStatus {
   PENDING
+  PUBLISHING
   PROCESSED
   FAILED
 }
@@ -194,6 +195,7 @@ model Event {
   nextRetryAt  DateTime? @map("next_retry_at")
   lastError    String?   @map("last_error")
   publishedAt  DateTime? @map("published_at")
+  claimedAt    DateTime? @map("claimed_at")
 
   createdAt DateTime    @default(now()) @map("created_at")
 

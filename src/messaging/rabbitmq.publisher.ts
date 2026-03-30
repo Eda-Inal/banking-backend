@@ -16,24 +16,31 @@ export class RabbitMqPublisher {
     routingKey: string,
     payload: unknown,
     options?: PublishOptions,
-  ): Promise<boolean> {
-    const channel = this.rabbit.getChannel();
+  ): Promise<void> {
+    const channel = this.rabbit.getPublisherChannel();
 
     await channel.assertExchange(exchange, 'topic', { durable: true });
 
-    const ok = channel.publish(
-      exchange,
-      routingKey,
-      Buffer.from(JSON.stringify(payload)),
-      {
-        persistent: true,
-        contentType: 'application/json',
-        messageId: options?.messageId,
-        timestamp: (options?.timestamp ?? new Date()).getTime(),
-        headers: options?.headers ?? {},
-      },
-    );
-
-    return ok;
+    await new Promise<void>((resolve, reject) => {
+      channel.publish(
+        exchange,
+        routingKey,
+        Buffer.from(JSON.stringify(payload)),
+        {
+          persistent: true,
+          contentType: 'application/json',
+          messageId: options?.messageId,
+          timestamp: (options?.timestamp ?? new Date()).getTime(),
+          headers: options?.headers ?? {},
+        },
+        (err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve();
+        },
+      );
+    });
   }
 }

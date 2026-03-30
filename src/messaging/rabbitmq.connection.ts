@@ -5,7 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { connect, type Channel, type ChannelModel } from 'amqplib';
+import { connect, type Channel, type ChannelModel, type ConfirmChannel } from 'amqplib';
 import { CONFIG_KEYS } from '../config/config';
 
 @Injectable()
@@ -13,6 +13,7 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RabbitMqConnection.name);
   private connection: ChannelModel | null = null;
   private channel: Channel | null = null;
+  private publisherChannel: ConfirmChannel | null = null;
 
   constructor(private readonly config: ConfigService) {}
 
@@ -25,6 +26,7 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
     const connection = await connect(url);
     this.connection = connection;
     this.channel = await connection.createChannel();
+    this.publisherChannel = await connection.createConfirmChannel();
     await this.setupTopology(this.channel);
 
     connection.on('error', (err) => {
@@ -39,6 +41,11 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.publisherChannel) {
+      await this.publisherChannel.close();
+      this.publisherChannel = null;
+    }
+
     if (this.channel) {
       await this.channel.close();
       this.channel = null;
@@ -57,8 +64,19 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
     return this.channel;
   }
 
+  getPublisherChannel(): ConfirmChannel {
+    if (!this.publisherChannel) {
+      throw new Error('RabbitMQ publisher channel is not initialized');
+    }
+    return this.publisherChannel;
+  }
+
   isReady(): boolean {
-    return this.connection !== null && this.channel !== null;
+    return (
+      this.connection !== null &&
+      this.channel !== null &&
+      this.publisherChannel !== null
+    );
   }
 
   private async setupTopology(channel: Channel): Promise<void> {

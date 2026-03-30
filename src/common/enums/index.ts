@@ -44,6 +44,7 @@ export enum EventType {
 
 export enum EventStatus {
     PENDING = 'PENDING',
+    PUBLISHING = 'PUBLISHING',
     PROCESSED = 'PROCESSED',
     FAILED = 'FAILED',
 }
