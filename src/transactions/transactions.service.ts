@@ -205,13 +205,16 @@ export class TransactionsService {
           'Account is not active',
         );
 
-        const fraudResult = await this.fraudService.evaluateWithdraw({
-          scope: 'WITHDRAW',
-          userId,
-          referenceId,
-          fromAccountId,
-          amount: amountDecimal,
-        });
+        const fraudResult = await this.fraudService.evaluateWithdraw(
+          {
+            scope: 'WITHDRAW',
+            userId,
+            referenceId,
+            fromAccountId,
+            amount: amountDecimal,
+          },
+          tx,
+        );
 
         if (fraudResult.decision === 'REJECT') {
           const rejectedTransaction =
@@ -301,6 +304,25 @@ export class TransactionsService {
       );
       return result.dto;
     } catch (err) {
+      const errorCode =
+        err &&
+        typeof err === 'object' &&
+        'code' in err &&
+        typeof (err as { code?: unknown }).code === 'string'
+          ? (err as { code?: string }).code
+          : undefined;
+      const isP2002 = errorCode === 'P2002';
+
+      if (!isP2002) {
+        await this.fraudService.releaseWithdrawDailyReservation({
+          scope: 'WITHDRAW',
+          userId,
+          referenceId,
+          fromAccountId,
+          amount: amountDecimal,
+        });
+      }
+
       const fallback = await this.idempotencyChecker.resolveP2002Fallback({
         err,
         userId,
@@ -364,14 +386,17 @@ export class TransactionsService {
           'From account is not active',
         );
 
-        const fraudResult = await this.fraudService.evaluateTransfer({
-          userId,
-          fromAccountId,
-          toAccountId,
-          amount: amountDecimal,
-          referenceId,
-          scope: 'TRANSFER',
-        });
+        const fraudResult = await this.fraudService.evaluateTransfer(
+          {
+            userId,
+            fromAccountId,
+            toAccountId,
+            amount: amountDecimal,
+            referenceId,
+            scope: 'TRANSFER',
+          },
+          tx,
+        );
 
         if (fraudResult.decision === 'REJECT') {
           const rejectedTransaction =

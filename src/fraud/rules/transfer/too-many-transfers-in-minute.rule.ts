@@ -2,6 +2,7 @@ import { TransferFraudRule } from '../fraud-rule.interface';
 import { TransferFraudCheckInput } from '../../types/transfer-fraud-check-input.type';
 import { FraudDecisionResult } from '../../types/fraud-decision-result.type';
 import { RedisService } from '../../../redis/redis.service';
+import type { Prisma } from '../../../generated/prisma/client';
 
 export class TooManyTransfersInMinuteRule implements TransferFraudRule {
   name = 'TOO_MANY_TRANSFERS_IN_MINUTE';
@@ -11,7 +12,10 @@ export class TooManyTransfersInMinuteRule implements TransferFraudRule {
     private readonly limitPerMinute: number,
   ) {}
 
-  async evaluate(input: TransferFraudCheckInput): Promise<FraudDecisionResult | null> {
+  async evaluate(
+    input: TransferFraudCheckInput,
+    _tx?: Prisma.TransactionClient,
+  ): Promise<FraudDecisionResult | null> {
     const client = this.redisService.getClient();
     const minuteBucket = this.getMinuteBucket();
     const key = `fraud:transfer:minute:${input.userId}:${minuteBucket}`;

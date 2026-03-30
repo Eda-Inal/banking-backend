@@ -13,10 +13,15 @@ export class DailyTransferLimitExceededRule implements TransferFraudRule {
     private readonly dailyLimit: number,
   ) {}
 
-  async evaluate(input: TransferFraudCheckInput): Promise<FraudDecisionResult | null> {
+  async evaluate(
+    input: TransferFraudCheckInput,
+    tx?: Prisma.TransactionClient,
+  ): Promise<FraudDecisionResult | null> {
     const { startOfDayUtc, endOfDayUtc } = this.getUtcDayRange();
 
-    const aggregate = await this.prisma.transaction.aggregate({
+    const client = (tx ?? this.prisma) as unknown as Prisma.TransactionClient;
+
+    const aggregate = await client.transaction.aggregate({
       _sum: { amount: true },
       where: {
         type: TransactionType.TRANSFER,

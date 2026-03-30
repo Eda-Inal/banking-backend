@@ -44,8 +44,8 @@ import { DailyWithdrawLimitExceededRule } from './rules/withdraw/daily-withdraw-
     },
     {
       provide: WITHDRAW_FRAUD_RULES,
-      inject: [ConfigService, PrismaService],
-      useFactory: (config: ConfigService, prisma: PrismaService) => {
+      inject: [ConfigService, RedisService],
+      useFactory: (config: ConfigService, redisService: RedisService) => {
         const withdrawThreshold = Number(
           config.get<string>(CONFIG_KEYS.FRAUD_WITHDRAW_MAX_AMOUNT) ?? '50000',
         );
@@ -55,7 +55,7 @@ import { DailyWithdrawLimitExceededRule } from './rules/withdraw/daily-withdraw-
 
         return [
           new WithdrawAmountExceededRule(withdrawThreshold),
-          new DailyWithdrawLimitExceededRule(prisma, dailyWithdrawLimit),
+          new DailyWithdrawLimitExceededRule(redisService, dailyWithdrawLimit),
         ];
       },
     },
