@@ -54,14 +54,27 @@ export class AuthService {
 
 
         const hashedPassword = await bcrypt.hash(password, 10);
-       const registeredCustomer = await this.prisma.customer.create({
-            data: {
-                email,
-                passwordHash: hashedPassword,
-                name,
-                phone,
-            },
-        })
+        let registeredCustomer;
+        try {
+            registeredCustomer = await this.prisma.customer.create({
+                data: {
+                    email,
+                    passwordHash: hashedPassword,
+                    name,
+                    phone,
+                },
+            });
+        } catch (err) {
+            const isP2002 =
+                err instanceof Error &&
+                'code' in err &&
+                (err as { code?: string }).code === 'P2002';
+            if (isP2002) {
+                this.logger.warn(`Register unique conflict for email: ${email}`);
+                throw new ConflictException('Customer already exists');
+            }
+            throw err;
+        }
         await this.audit.recordSuccess({
             action: AuditAction.REGISTER,
             customerId: registeredCustomer.id,
@@ -100,16 +113,8 @@ export class AuthService {
         if (customer.lockUntil && customer.lockUntil > now) {
             throw new AccountLockedException('Account temporarily locked due to too many failed attempts. Try again later.');
         }
-        if (customer.lockUntil != null && customer.lockUntil <= now) {
-            customer = await this.prisma.customer.update({
-                where: { id: customer.id },
-                data: { failedLoginAttempts: 0, lockUntil: null },
-            });
-            this.logger.log(`Account lock reset after expiry: ${customer.id} (${customer.email})`);
-        }
         const threshold = Number(this.config.get(CONFIG_KEYS.LOGIN_LOCK_THRESHOLD)) || 5;
         const durationMinutes = Number(this.config.get(CONFIG_KEYS.LOGIN_LOCK_DURATION_MINUTES)) || 15;
-        const delayCapSeconds = Number(this.config.get(CONFIG_KEYS.LOGIN_DELAY_CAP_SECONDS)) || 30;
 
 
         const isPasswordValid = await bcrypt.compare(password, customer.passwordHash);
@@ -124,7 +129,7 @@ export class AuthService {
                         failed_login_attempts = failed_login_attempts + 1,
                         lock_until = CASE
                             WHEN failed_login_attempts + 1 >= ${threshold} THEN NOW() + (${durationMinutes} * interval '1 minute')
-                            ELSE lock_until
+                            ELSE NULL
                         END
                     WHERE id = ${customer.id}
                     RETURNING failed_login_attempts, lock_until
@@ -141,11 +146,6 @@ export class AuthService {
                     `Account locked due to failed attempts: ${customer.id} (${customer.email}) until ${updated.lock_until}`,
                 );
             }
-
-            const newAttempts = updated.failed_login_attempts;
-
-            const delaySeconds = Math.min(delayCapSeconds, Math.pow(2, newAttempts));
-            await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
             await this.audit.recordFailure({
                 action: AuditAction.LOGIN,
                 customerId: customer.id,
@@ -181,6 +181,16 @@ export class AuthService {
             this.config.get(CONFIG_KEYS.JWT_REFRESH_EXPIRES_IN),
         );
         const expiresAt = new Date(Date.now() + refreshTtlSeconds * 1000);
+
+        await this.prisma.refreshToken.updateMany({
+            where: {
+                customerId: customer.id,
+                revokedAt: null,
+            },
+            data: {
+                revokedAt: new Date(),
+            },
+        });
 
         await this.prisma.refreshToken.create({
             data: {
@@ -241,24 +251,6 @@ export class AuthService {
             this.logger.warn('Refresh failed: token hash not found');
             throw new UnauthorizedException('Invalid refresh token');
         }
-        if (refreshTokenRecord.revokedAt) {
-            this.logger.warn(
-                `Refresh failed: token revoked for user ${refreshTokenRecord.customerId}`,
-            );
-            throw new UnauthorizedException('Refresh token revoked');
-        }
-        if (refreshTokenRecord.expiresAt < new Date()) {
-            this.logger.warn(
-                `Refresh failed: token expired for user ${refreshTokenRecord.customerId}`,
-            );
-            throw new UnauthorizedException('Refresh token expired');
-        }
-        if (refreshTokenRecord.replacedById) {
-            this.logger.warn(
-                `Refresh failed: token already used (rotated) for user ${refreshTokenRecord.customerId}`,
-            );
-            throw new UnauthorizedException('Refresh token already used');
-        }
         const customer = refreshTokenRecord.customer;
         if (!customer) {
             this.logger.warn(
@@ -278,22 +270,33 @@ export class AuthService {
         );
         const newExpiresAt = new Date(Date.now() + refreshTtlSeconds * 1000);
 
-        const newTokenRecord = await this.prisma.refreshToken.create({
-            data: {
-                customerId: customer.id,
-                tokenHash: newTokenHash,
-                expiresAt: newExpiresAt,
-                ipAddress: clientIpMasked,
-                userAgent,
-            },
-        });
+        await this.prisma.$transaction(async (tx) => {
+            const newTokenRecord = await tx.refreshToken.create({
+                data: {
+                    customerId: customer.id,
+                    tokenHash: newTokenHash,
+                    expiresAt: newExpiresAt,
+                    ipAddress: clientIpMasked,
+                    userAgent,
+                },
+            });
 
-        await this.prisma.refreshToken.update({
-            where: { id: refreshTokenRecord.id },
-            data: {
-                revokedAt: new Date(),
-                replacedById: newTokenRecord.id,
-            },
+            const revoked = await tx.refreshToken.updateMany({
+                where: {
+                    id: refreshTokenRecord.id,
+                    revokedAt: null,
+                    replacedById: null,
+                    expiresAt: { gt: new Date() },
+                },
+                data: {
+                    revokedAt: new Date(),
+                    replacedById: newTokenRecord.id,
+                },
+            });
+
+            if (revoked.count !== 1) {
+                throw new UnauthorizedException('Refresh token already used');
+            }
         });
 
         this.logger.log(`Refresh token rotated for user ${customer.id} (${customer.email})`);

@@ -44,26 +44,29 @@ export class UsersService {
             this.logger.warn(`putMe: user not found for id ${userId}`);
             throw new NotFoundException('User not found');
         }
-        if (email && email !== user.email) {
-            const existingUser = await this.prisma.customer.findUnique({
-                where: { email },
+
+        let updatedUser;
+        try {
+            updatedUser = await this.prisma.customer.update({
+                where: { id: userId },
+                data: {
+                    email: email ?? user?.email,
+                    name: name ?? user?.name,
+                    phone: phone ?? user?.phone,
+                },
+                include: { accounts: true },
             });
-            if (existingUser && existingUser.id !== userId) {
-                this.logger.warn(`putMe: email conflict for ${email} (requested by user ${userId})`);
+        } catch (err) {
+            const isP2002 =
+                err instanceof Error &&
+                'code' in err &&
+                (err as { code?: string }).code === 'P2002';
+            if (isP2002) {
+                this.logger.warn(`putMe: unique conflict for email ${email ?? '(unchanged)'} (user ${userId})`);
                 throw new ConflictException('Email already exists');
             }
+            throw err;
         }
-
-
-        const updatedUser = await this.prisma.customer.update({
-            where: { id: userId },
-            data: {
-                email: email ?? user?.email,
-                name: name ?? user?.name,
-                phone: phone ?? user?.phone,
-            },
-            include: { accounts: true },
-        });
 
         this.logger.log(
             `User profile updated: ${updatedUser.id} (${updatedUser.email}) - fields: ${[
@@ -101,9 +104,20 @@ export class UsersService {
         }
 
         const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-        await this.prisma.customer.update({
-            where: { id: userId },
-            data: { passwordHash: hashedNewPassword },
+        await this.prisma.$transaction(async (tx) => {
+            await tx.customer.update({
+                where: { id: userId },
+                data: { passwordHash: hashedNewPassword },
+            });
+            await tx.refreshToken.updateMany({
+                where: {
+                    customerId: userId,
+                    revokedAt: null,
+                },
+                data: {
+                    revokedAt: new Date(),
+                },
+            });
         });
 
         await this.audit.recordSuccess({
