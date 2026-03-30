@@ -1,4 +1,4 @@
-import { Controller, UseGuards, Post, Body, Req } from '@nestjs/common';
+import { ConflictException, Controller, UseGuards, Post, Body, Req } from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
 import { JwtGuard } from '../auth/jwt.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -41,7 +41,9 @@ export class TransactionsController {
       return result;
     } catch (err) {
       if (key) {
-        await this.redis.getClient().del(key);
+        if (!(err instanceof ConflictException)) {
+          await this.redis.getClient().del(key);
+        }
       }
       throw err;
     }
@@ -66,7 +68,9 @@ export class TransactionsController {
       return result;
     } catch (err) {
       if (key) {
-        await this.redis.getClient().del(key);
+        if (!(err instanceof ConflictException)) {
+          await this.redis.getClient().del(key);
+        }
       }
       throw err;
     }
@@ -91,7 +95,9 @@ export class TransactionsController {
       return result;
     } catch (err) {
       if (key) {
-        await this.redis.getClient().del(key);
+        if (!(err instanceof ConflictException)) {
+          await this.redis.getClient().del(key);
+        }
       }
       throw err;
     }

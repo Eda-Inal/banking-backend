@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TransactionResponseDto } from './dto/transaction-response.dto';
 import { transactionMapper } from './transactions.mapper';
@@ -71,7 +71,28 @@ export class TransactionIdempotencyChecker {
     this.logger.log(
       `${type} P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`,
     );
-    return transactionMapper.toResponseDto(byRef);
+
+    if (byRef.status === TransactionStatus.COMPLETED) {
+      return transactionMapper.toResponseDto(byRef);
+    }
+
+    if (
+      byRef.status === TransactionStatus.REJECTED &&
+      byRef.fraudDecision === 'REJECT'
+    ) {
+      throw new BadRequestException(
+        getFraudRejectionMessage(type, byRef.fraudReason ?? undefined),
+      );
+    }
+
+    if (byRef.status === TransactionStatus.PENDING) {
+      throw new ConflictException(
+        `${type} transaction is still in progress (referenceId=${referenceId})`,
+      );
+    }
+    throw new BadRequestException(
+      `${type} transaction has unexpected status: ${byRef.status}`,
+    );
   }
 }
 
