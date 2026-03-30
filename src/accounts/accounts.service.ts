@@ -55,9 +55,22 @@ export class AccountsService {
             throw new ConflictException(`You already have an account with ${currency}`);
         }
 
-        const account = await this.prisma.account.create({
-            data: { customerId: userId, currency },
-        });
+        let account;
+        try {
+            account = await this.prisma.account.create({
+                data: { customerId: userId, currency },
+            });
+        } catch (err) {
+            const isP2002 =
+                err instanceof Error &&
+                'code' in err &&
+                (err as { code?: string }).code === 'P2002';
+            if (isP2002) {
+                this.logger.warn(`createAccount: unique conflict for user ${userId}, currency ${currency}`);
+                throw new ConflictException(`You already have an account with ${currency}`);
+            }
+            throw err;
+        }
         await this.prisma.auditLog.create({
             data: {
                 action: PrismaAction.ACCOUNT_CREATE,
