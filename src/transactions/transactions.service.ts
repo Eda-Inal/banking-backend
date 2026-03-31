@@ -15,10 +15,6 @@ import { TransactionIdempotencyChecker } from './transaction-idempotency-checker
 import { TransactionRepository } from './transaction-repository';
 import { TransactionEventWriter } from './transaction-event-writer';
 
-type WithdrawTxResult =
-  | { kind: 'SUCCESS'; dto: TransactionResponseDto }
-  | { kind: 'REJECT'; fraudReason?: string };
-
 type TransferTxResult = { kind: 'SUCCESS'; dto: TransactionResponseDto };
 
 @Injectable()
@@ -183,7 +179,56 @@ export class TransactionsService {
     }
 
     try {
-      const result = (await this.prisma.$transaction(async (tx) => {
+      const preFraudResult = await this.fraudService.evaluateWithdraw({
+        scope: 'WITHDRAW',
+        userId,
+        referenceId,
+        fromAccountId,
+        amount: amountDecimal,
+      });
+
+      if (preFraudResult.decision === 'REJECT') {
+        const rejected = await this.prisma.$transaction(async (tx) => {
+          const rejectedTransaction =
+            await this.transactionRepository.createRejectedTransaction({
+              tx,
+              type: TransactionType.WITHDRAW,
+              actorCustomerId: userId,
+              fromAccountId,
+              toAccountId: null,
+              amount,
+              referenceId,
+              fraudDecision: 'REJECT',
+              fraudReason: preFraudResult.reason,
+            });
+
+          await this.transactionEventWriter.createFailedFraudEvent({
+            tx,
+            actorId: userId,
+            resourceId: rejectedTransaction.id,
+            traceId,
+            transactionType: TransactionType.WITHDRAW,
+            referenceId,
+            amount,
+            fromAccountId,
+            toAccountId: null,
+            fraudRule: preFraudResult.reason,
+            clientIpMasked,
+            userAgent,
+          });
+
+          return { fraudReason: preFraudResult.reason };
+        });
+
+        throw new BadRequestException(
+          getFraudRejectionMessage(
+            TransactionType.WITHDRAW,
+            rejected.fraudReason,
+          ),
+        );
+      }
+
+      const result = await this.prisma.$transaction(async (tx) => {
         const account = await this.accountValidator.getAccountOrThrow(
           tx,
           fromAccountId,
@@ -202,49 +247,6 @@ export class TransactionsService {
           fromAccountId,
           'Account is not active',
         );
-
-        const fraudResult = await this.fraudService.evaluateWithdraw(
-          {
-            scope: 'WITHDRAW',
-            userId,
-            referenceId,
-            fromAccountId,
-            amount: amountDecimal,
-          },
-          tx,
-        );
-
-        if (fraudResult.decision === 'REJECT') {
-          const rejectedTransaction =
-            await this.transactionRepository.createRejectedTransaction({
-              tx,
-              type: TransactionType.WITHDRAW,
-              actorCustomerId: userId,
-              fromAccountId,
-              toAccountId: null,
-              amount,
-              referenceId,
-              fraudDecision: fraudResult.decision,
-              fraudReason: fraudResult.reason,
-            });
-
-          await this.transactionEventWriter.createFailedFraudEvent({
-            tx,
-            actorId: userId,
-            resourceId: rejectedTransaction.id,
-            traceId,
-            transactionType: TransactionType.WITHDRAW,
-            referenceId,
-            amount,
-            fromAccountId,
-            toAccountId: null,
-            fraudRule: fraudResult.reason,
-            clientIpMasked,
-            userAgent,
-          });
-
-          return { kind: 'REJECT', fraudReason: fraudResult.reason };
-        }
 
         const transaction =
           await this.transactionRepository.createPendingTransaction({
@@ -285,22 +287,13 @@ export class TransactionsService {
           userAgent,
         });
 
-        return {
-          kind: 'SUCCESS',
-          dto: transactionMapper.toResponseDto(completedTransaction),
-        };
-      })) as WithdrawTxResult;
-
-      if (result.kind === 'REJECT') {
-        throw new BadRequestException(
-          getFraudRejectionMessage(TransactionType.WITHDRAW, result.fraudReason),
-        );
-      }
+        return transactionMapper.toResponseDto(completedTransaction);
+      });
 
       this.logger.log(
-        `Withdraw completed: transactionId=${result.dto.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`,
+        `Withdraw completed: transactionId=${result.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`,
       );
-      return result.dto;
+      return result;
     } catch (err) {
       const errorCode =
         err &&
