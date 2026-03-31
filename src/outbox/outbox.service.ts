@@ -95,8 +95,10 @@ export class OutboxService {
         payload: row.payload,
         createdAt: row.created_at,
         retryCount: row.retry_count,
+        claimedAt: row.claimed_at,
       };
 
+      let published = false;
       try {
         const routingKey = String(evt.type).toLowerCase();
         const message: OutboxPublishMessage = {
@@ -121,9 +123,14 @@ export class OutboxService {
             },
           },
         );
+        published = true;
 
         const finalized = await this.prisma.event.updateMany({
-          where: { id: evt.id, status: EventStatus.PUBLISHING },
+          where: {
+            id: evt.id,
+            status: EventStatus.PUBLISHING,
+            claimedAt: evt.claimedAt,
+          },
           data: {
             status: EventStatus.PROCESSED,
             publishedAt: new Date(),
@@ -142,6 +149,16 @@ export class OutboxService {
           this.logger.log(`Outbox published event ${evt.id} (${evt.type})`);
         }
       } catch (error) {
+        if (published) {
+          // critical: message already published. Never downgrade to FAILED here, or we risk duplicate publish retries.
+          this.logger.error(
+            `Outbox published-but-finalize-failed eventId=${evt.id} claimedAt=${evt.claimedAt?.toISOString() ?? 'null'} error=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          continue;
+        }
+
         const currentRetry = evt.retryCount ?? 0;
         const nextRetryCount = currentRetry + 1;
         const shouldRetry = nextRetryCount <= this.maxRetries;
@@ -153,7 +170,11 @@ export class OutboxService {
           : null;
 
         const updated = await this.prisma.event.updateMany({
-          where: { id: evt.id, status: EventStatus.PUBLISHING },
+          where: {
+            id: evt.id,
+            status: EventStatus.PUBLISHING,
+            claimedAt: evt.claimedAt,
+          },
           data: {
             status: EventStatus.FAILED,
             retryCount: nextRetryCount,
