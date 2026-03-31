@@ -182,24 +182,26 @@ export class AuthService {
         );
         const expiresAt = new Date(Date.now() + refreshTtlSeconds * 1000);
 
-        await this.prisma.refreshToken.updateMany({
-            where: {
-                customerId: customer.id,
-                revokedAt: null,
-            },
-            data: {
-                revokedAt: new Date(),
-            },
-        });
+        await this.prisma.$transaction(async (tx) => {
+            await tx.refreshToken.updateMany({
+                where: {
+                    customerId: customer.id,
+                    revokedAt: null,
+                },
+                data: {
+                    revokedAt: new Date(),
+                },
+            });
 
-        await this.prisma.refreshToken.create({
-            data: {
-                customerId: customer.id,
-                tokenHash: refreshTokenHash,
-                expiresAt,
-                ipAddress: clientIpMasked,
-                userAgent,
-            },
+            await tx.refreshToken.create({
+                data: {
+                    customerId: customer.id,
+                    tokenHash: refreshTokenHash,
+                    expiresAt,
+                    ipAddress: clientIpMasked,
+                    userAgent,
+                },
+            });
         });
         await this.audit.recordSuccess({
             action: AuditAction.LOGIN,
