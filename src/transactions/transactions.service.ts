@@ -430,12 +430,6 @@ export class TransactionsService {
           fromAccountId,
           'From account is not active',
         );
-        this.accountValidator.ensureOwnedByUserOrThrow(
-          toAccount.customerId,
-          userId,
-          'Transfer',
-          toAccountId,
-        );
         this.accountValidator.ensureActiveOrThrow(
           toAccount.status,
           userId,

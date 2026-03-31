@@ -67,6 +67,9 @@ export class AccountsService {
                 'code' in err &&
                 (err as { code?: string }).code === 'P2002';
             if (isP2002) {
+                // Backstop for concurrent account creation attempts:
+                // Prisma schema cannot express this conditional uniqueness, so a DB partial unique
+                // index (added via SQL migration) enforces one non-CLOSED account per user/currency.
                 this.logger.warn(`createAccount: unique conflict for user ${userId}, currency ${currency}`);
                 throw new ConflictException(`You already have an account with ${currency}`);
             }
