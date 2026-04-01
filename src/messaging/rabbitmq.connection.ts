@@ -66,6 +66,11 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
       await this.connection.close();
       this.connection = null;
     }
+
+    this.structuredLogger.info(RabbitMqConnection.name, 'RabbitMQ disconnected', {
+      eventType: 'MESSAGING',
+      action: 'RABBITMQ_DISCONNECTED',
+    });
   }
 
   getChannel(): Channel {

@@ -7,7 +7,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
-    const request = ctx.getRequest<{ method: string; url: string; traceId?: string }>();
+    const request = ctx.getRequest<{ method: string; url: string }>();
     const response = ctx.getResponse();
 
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
@@ -39,7 +39,6 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         method: request.method,
         path: request.url,
         statusCode: status,
-        traceId: request.traceId,
       },
       error: exception instanceof Error
         ? exception

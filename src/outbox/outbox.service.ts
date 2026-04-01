@@ -142,10 +142,13 @@ export class OutboxService {
         });
 
         if (finalized.count !== 1) {
-          this.structuredLogger.warn(OutboxService.name, 'Outbox finalize PROCESSED skipped', {
-            eventType: 'OUTBOX',
-            action: 'FINALIZE_PROCESSED_SKIPPED',
-            eventId: evt.id,
+          this.structuredLogger.error(OutboxService.name, 'Outbox finalize PROCESSED skipped', {
+            details: {
+              eventType: 'OUTBOX',
+              action: 'FINALIZE_PROCESSED_SKIPPED',
+              eventId: evt.id,
+            },
+            error: { message: 'Published event could not be marked as PROCESSED' },
           });
         } else {
           this.metrics.processed += 1;
@@ -203,7 +206,7 @@ export class OutboxService {
             eventId: evt.id,
           });
         } else {
-          this.structuredLogger.warn(OutboxService.name, 'Outbox failed event', {
+          const failureDetails = {
             eventType: 'OUTBOX',
             action: 'PUBLISH_FAILED',
             eventId: evt.id,
@@ -211,8 +214,16 @@ export class OutboxService {
             retryCount: nextRetryCount,
             maxRetries: this.maxRetries,
             nextRetryAt: nextRetryAt?.toISOString() ?? null,
-            error: error instanceof Error ? error.message : String(error),
-          });
+            failure: error instanceof Error ? error.message : String(error),
+          };
+          if (shouldRetry) {
+            this.structuredLogger.warn(OutboxService.name, 'Outbox failed event', failureDetails);
+          } else {
+            this.structuredLogger.error(OutboxService.name, 'Outbox failed event and retries exhausted', {
+              details: failureDetails,
+              error: error instanceof Error ? error : { message: String(error) },
+            });
+          }
         }
       }
     }

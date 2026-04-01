@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { RabbitMqConnection } from './rabbitmq.connection';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 type PublishOptions = {
   messageId?: string;
@@ -9,7 +10,10 @@ type PublishOptions = {
 
 @Injectable()
 export class RabbitMqPublisher {
-  constructor(private readonly rabbit: RabbitMqConnection) {}
+  constructor(
+    private readonly rabbit: RabbitMqConnection,
+    private readonly structuredLogger: StructuredLogger,
+  ) {}
 
   async publish(
     exchange: string,
@@ -20,6 +24,13 @@ export class RabbitMqPublisher {
     const channel = this.rabbit.getPublisherChannel();
 
     await channel.assertExchange(exchange, 'topic', { durable: true });
+    this.structuredLogger.debug(RabbitMqPublisher.name, 'RabbitMQ publish requested', {
+      eventType: 'MESSAGING',
+      action: 'PUBLISH',
+      exchange,
+      routingKey,
+      messageId: options?.messageId ?? null,
+    });
 
     await new Promise<void>((resolve, reject) => {
       channel.publish(
@@ -35,6 +46,16 @@ export class RabbitMqPublisher {
         },
         (err) => {
           if (err) {
+            this.structuredLogger.error(RabbitMqPublisher.name, 'RabbitMQ publish failed', {
+              details: {
+                eventType: 'MESSAGING',
+                action: 'PUBLISH',
+                exchange,
+                routingKey,
+                messageId: options?.messageId ?? null,
+              },
+              error: err,
+            });
             reject(err);
             return;
           }

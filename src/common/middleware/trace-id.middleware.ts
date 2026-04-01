@@ -18,28 +18,16 @@ export class TraceIdMiddleware implements NestMiddleware {
     const clientIpMasked = getClientIpMasked(req);
     const userAgent = getUserAgent(req);
   
-    this.structuredLogger.info('TraceIdMiddleware', 'Incoming request', {
-      eventType: 'HTTP',
-      action: 'REQUEST_RECEIVED',
-      method: req.method,
-      path: requestPath,
-      traceId,
-    });
-  
-    res.on('finish', () => {
-      this.structuredLogger.info('TraceIdMiddleware', 'Response completed', {
-        eventType: 'HTTP',
-        action: 'RESPONSE_SENT',
-        method: req.method,
-        path: requestPath,
-        statusCode: res.statusCode,
-        traceId,
-      });
-    });
-  
     RequestContext.run(
       { clientIpMasked, userAgent, traceId, requestId: traceId },
       () => {
+        this.structuredLogger.info('TraceIdMiddleware', 'Incoming request', {
+          eventType: 'HTTP',
+          action: 'REQUEST_RECEIVED',
+          method: req.method,
+          path: requestPath,
+          traceId,
+        });
         next();
       },
     );

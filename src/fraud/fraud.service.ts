@@ -25,8 +25,31 @@ export class FraudService {
   ): Promise<FraudDecisionResult> {
     for (const rule of this.transferRules) {
       const result = await rule.evaluate(input, tx);
-      if (result && result.decision === 'REJECT') return result;
+      if (result && result.decision === 'REJECT') {
+        this.structuredLogger.warn(FraudService.name, 'Fraud transfer evaluation rejected', {
+          eventType: 'FRAUD',
+          action: 'EVALUATE_TRANSFER',
+          decision: 'REJECT',
+          rule: result.reason ?? rule.name,
+          userId: input.userId,
+          referenceId: input.referenceId,
+          fromAccountId: input.fromAccountId,
+          toAccountId: input.toAccountId,
+          amount: input.amount.toString(),
+        });
+        return result;
+      }
     }
+    this.structuredLogger.debug(FraudService.name, 'Fraud transfer evaluation approved', {
+      eventType: 'FRAUD',
+      action: 'EVALUATE_TRANSFER',
+      decision: 'APPROVE',
+      userId: input.userId,
+      referenceId: input.referenceId,
+      fromAccountId: input.fromAccountId,
+      toAccountId: input.toAccountId,
+      amount: input.amount.toString(),
+    });
     return { decision: 'APPROVE' };
   }
 
@@ -36,8 +59,29 @@ export class FraudService {
   ): Promise<FraudDecisionResult> {
     for (const rule of this.withdrawRules) {
       const result = await rule.evaluate(input, tx);
-      if (result && result.decision === 'REJECT') return result;
+      if (result && result.decision === 'REJECT') {
+        this.structuredLogger.warn(FraudService.name, 'Fraud withdraw evaluation rejected', {
+          eventType: 'FRAUD',
+          action: 'EVALUATE_WITHDRAW',
+          decision: 'REJECT',
+          rule: result.reason ?? rule.name,
+          userId: input.userId,
+          referenceId: input.referenceId,
+          fromAccountId: input.fromAccountId,
+          amount: input.amount.toString(),
+        });
+        return result;
+      }
     }
+    this.structuredLogger.debug(FraudService.name, 'Fraud withdraw evaluation approved', {
+      eventType: 'FRAUD',
+      action: 'EVALUATE_WITHDRAW',
+      decision: 'APPROVE',
+      userId: input.userId,
+      referenceId: input.referenceId,
+      fromAccountId: input.fromAccountId,
+      amount: input.amount.toString(),
+    });
     return { decision: 'APPROVE' };
   }
 
@@ -58,13 +102,15 @@ export class FraudService {
       try {
         await rule.releaseReservation(input);
       } catch (error) {
-        this.structuredLogger.warn(FraudService.name, 'Transfer reservation release failed', {
-          eventType: 'FRAUD',
-          action: 'RELEASE_TRANSFER_RESERVATION',
-          rule: rule.name,
-          userId: input.userId,
-          referenceId: input.referenceId,
-          error: error instanceof Error ? error.message : String(error),
+        this.structuredLogger.error(FraudService.name, 'Transfer reservation release failed', {
+          details: {
+            eventType: 'FRAUD',
+            action: 'RELEASE_TRANSFER_RESERVATION',
+            rule: rule.name,
+            userId: input.userId,
+            referenceId: input.referenceId,
+          },
+          error: error instanceof Error ? error : { message: String(error) },
         });
       }
     }
@@ -87,13 +133,15 @@ export class FraudService {
       try {
         await rule.releaseReservation(input);
       } catch (error) {
-        this.structuredLogger.warn(FraudService.name, 'Withdraw reservation release failed', {
-          eventType: 'FRAUD',
-          action: 'RELEASE_WITHDRAW_RESERVATION',
-          rule: rule.name,
-          userId: input.userId,
-          referenceId: input.referenceId,
-          error: error instanceof Error ? error.message : String(error),
+        this.structuredLogger.error(FraudService.name, 'Withdraw reservation release failed', {
+          details: {
+            eventType: 'FRAUD',
+            action: 'RELEASE_WITHDRAW_RESERVATION',
+            rule: rule.name,
+            userId: input.userId,
+            referenceId: input.referenceId,
+          },
+          error: error instanceof Error ? error : { message: String(error) },
         });
       }
     }

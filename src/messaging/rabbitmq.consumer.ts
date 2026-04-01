@@ -149,7 +149,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
             messageId,
             attempt: nextAttempts,
             maxRetries: this.maxRetries,
-            error: error instanceof Error ? error.message : String(error),
+            failure: error instanceof Error ? error.message : String(error),
           });
           return;
         }
@@ -157,14 +157,16 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
 
       const requeue = false;
       this.metrics.nacked += 1;
-      this.structuredLogger.warn(RabbitMqConsumer.name, 'Consumer nack', {
-        eventType: 'MESSAGING',
-        action: 'CONSUME_NACK',
-        messageId,
-        requeue,
-        attempt: nextAttempts,
-        maxRetries: this.maxRetries,
-        error: error instanceof Error ? error.message : String(error),
+      this.structuredLogger.error(RabbitMqConsumer.name, 'Consumer nack', {
+        details: {
+          eventType: 'MESSAGING',
+          action: 'CONSUME_NACK',
+          messageId,
+          requeue,
+          attempt: nextAttempts,
+          maxRetries: this.maxRetries,
+        },
+        error: error instanceof Error ? error : { message: String(error) },
       });
       channel.nack(msg, false, requeue);
     }
@@ -204,7 +206,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
       this.structuredLogger.warn(RabbitMqConsumer.name, 'RabbitMQ consumer bootstrap retry', {
         eventType: 'MESSAGING',
         action: 'CONSUMER_BOOTSTRAP_RETRY',
-        error: error instanceof Error ? error.message : String(error),
+        failure: error instanceof Error ? error.message : String(error),
       });
     }
   }

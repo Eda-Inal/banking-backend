@@ -12,6 +12,7 @@ import { randomUUID } from 'crypto';
 import { Request } from 'express';
 import { CONFIG_KEYS } from '../../config/config';
 import { RedisService } from '../../redis/redis.service';
+import { StructuredLogger } from '../../logger/structured-logger.service';
 
 export type IdempotencyRequest = Request & {
   idempotencyKey?: string;
@@ -30,6 +31,7 @@ export class TransactionsIdempotencyGuard implements CanActivate {
   constructor(
     private readonly redis: RedisService,
     private readonly config: ConfigService,
+    private readonly structuredLogger: StructuredLogger,
   ) {}
 
   private extractReferenceId(request: Request): string | undefined {
@@ -103,6 +105,13 @@ export class TransactionsIdempotencyGuard implements CanActivate {
           );
           if (lockOk !== 'OK') {
             await client.del(key);
+            this.structuredLogger.warn(TransactionsIdempotencyGuard.name, 'Transfer lock conflict', {
+              eventType: 'TRANSACTION',
+              action: 'TRANSFER_LOCK_CONFLICT',
+              userId,
+              operation: 'transfer',
+              referenceId,
+            });
             throw new ConflictException('Another transfer is already in progress');
           }
           request.transferUserLockKey = transferLockKey;
@@ -125,6 +134,14 @@ export class TransactionsIdempotencyGuard implements CanActivate {
       }
       
       if (state === 'in-flight') {
+        this.structuredLogger.warn(TransactionsIdempotencyGuard.name, 'Idempotency conflict in-flight', {
+          eventType: 'TRANSACTION',
+          action: 'IDEMPOTENCY_CONFLICT',
+          userId,
+          referenceId,
+          operation,
+          state: 'in-flight',
+        });
         throw new ConflictException('Duplicate request in progress');
       }
       throw new ConflictException('Duplicate request');

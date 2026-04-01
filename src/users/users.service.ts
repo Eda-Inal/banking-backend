@@ -26,7 +26,7 @@ export class UsersService {
             include: { accounts: true },
         });
         if (!user) {
-            this.structuredLogger.warn(UsersService.name, 'User not found in getMe', { eventType: 'USER', action: 'GET_ME', userId });
+            this.structuredLogger.warn(UsersService.name, 'User not found', { eventType: 'USER', action: 'GET_ME', userId });
             throw new NotFoundException('User not found');
         }
         return userMapper.toMeResponseDto(user);
@@ -41,7 +41,7 @@ export class UsersService {
         });
 
         if (!user) {
-            this.structuredLogger.warn(UsersService.name, 'User not found in putMe', { eventType: 'USER', action: 'PUT_ME', userId });
+            this.structuredLogger.warn(UsersService.name, 'User not found', { eventType: 'USER', action: 'PUT_ME', userId });
             throw new NotFoundException('User not found');
         }
 
@@ -62,9 +62,17 @@ export class UsersService {
                 'code' in err &&
                 (err as { code?: string }).code === 'P2002';
             if (isP2002) {
-                this.structuredLogger.warn(UsersService.name, 'User update unique conflict', { eventType: 'USER', action: 'PUT_ME', userId, email: email ?? null, code: 'P2002' });
+                this.structuredLogger.warn(UsersService.name, 'User update unique conflict', { eventType: 'USER', action: 'PUT_ME', userId, code: 'P2002' });
                 throw new ConflictException('Email already exists');
             }
+            this.structuredLogger.error(UsersService.name, 'User profile update failed due to unexpected technical error', {
+                details: {
+                    eventType: 'USER',
+                    action: 'PUT_ME',
+                    userId,
+                },
+                error: err instanceof Error ? err : { message: String(err) },
+            });
             throw err;
         }
 
@@ -72,7 +80,6 @@ export class UsersService {
             eventType: 'USER',
             action: 'PUT_ME',
             userId: updatedUser.id,
-            email: updatedUser.email,
             updatedFields: [email ? 'email' : null, name ? 'name' : null, phone ? 'phone' : null].filter(Boolean),
         });
 
@@ -97,7 +104,6 @@ export class UsersService {
                 eventType: 'USER',
                 action: 'PATCH_PASSWORD',
                 userId: user.id,
-                email: user.email,
             });
             throw new UnauthorizedException('Invalid old password');
         }
@@ -107,21 +113,33 @@ export class UsersService {
         }
 
         const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-        await this.prisma.$transaction(async (tx) => {
-            await tx.customer.update({
-                where: { id: userId },
-                data: { passwordHash: hashedNewPassword },
+        try {
+            await this.prisma.$transaction(async (tx) => {
+                await tx.customer.update({
+                    where: { id: userId },
+                    data: { passwordHash: hashedNewPassword },
+                });
+                await tx.refreshToken.updateMany({
+                    where: {
+                        customerId: userId,
+                        revokedAt: null,
+                    },
+                    data: {
+                        revokedAt: new Date(),
+                    },
+                });
             });
-            await tx.refreshToken.updateMany({
-                where: {
-                    customerId: userId,
-                    revokedAt: null,
+        } catch (err) {
+            this.structuredLogger.error(UsersService.name, 'Password change failed due to unexpected technical error', {
+                details: {
+                    eventType: 'USER',
+                    action: 'PATCH_PASSWORD',
+                    userId,
                 },
-                data: {
-                    revokedAt: new Date(),
-                },
+                error: err instanceof Error ? err : { message: String(err) },
             });
-        });
+            throw err;
+        }
 
         await this.audit.recordSuccess({
             action: AuditAction.PASSWORD_CHANGE,
@@ -137,7 +155,6 @@ export class UsersService {
             eventType: 'USER',
             action: 'PATCH_PASSWORD',
             userId: user.id,
-            email: user.email,
         });
         return {
             message: 'Password updated successfully',

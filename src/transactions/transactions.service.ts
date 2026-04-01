@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, HttpException, Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { FraudService } from '../fraud/fraud.service';
@@ -146,7 +146,6 @@ export class TransactionsService {
         amount,
         referenceId,
         userId,
-        status: 'SUCCESS',
       });
       return result;
     } catch (err) {
@@ -158,6 +157,19 @@ export class TransactionsService {
       });
       if (fallback) {
         return fallback;
+      }
+      if (!(err instanceof HttpException)) {
+        this.structuredLogger.error(TransactionsService.name, 'Deposit failed due to unexpected technical error', {
+          details: {
+            eventType: 'TRANSACTION',
+            action: 'DEPOSIT',
+            userId,
+            referenceId,
+            toAccountId,
+            amount,
+          },
+          error: err instanceof Error ? err : { message: String(err) },
+        });
       }
       throw err;
     }
@@ -226,6 +238,17 @@ export class TransactionsService {
           });
 
           return { fraudReason: preFraudResult.reason };
+        });
+
+        this.structuredLogger.warn(TransactionsService.name, 'Withdraw rejected by fraud policy', {
+          eventType: 'TRANSACTION',
+          action: 'FRAUD_REJECTED',
+          transactionType: TransactionType.WITHDRAW,
+          userId,
+          referenceId,
+          fromAccountId,
+          amount,
+          fraudRule: rejected.fraudReason,
         });
 
         throw new BadRequestException(
@@ -306,7 +329,6 @@ export class TransactionsService {
         amount,
         referenceId,
         userId,
-        status: 'SUCCESS',
       });
       return result;
     } catch (err) {
@@ -337,6 +359,19 @@ export class TransactionsService {
       });
       if (fallback) {
         return fallback;
+      }
+      if (!(err instanceof HttpException)) {
+        this.structuredLogger.error(TransactionsService.name, 'Withdraw failed due to unexpected technical error', {
+          details: {
+            eventType: 'TRANSACTION',
+            action: 'WITHDRAW',
+            userId,
+            referenceId,
+            fromAccountId,
+            amount,
+          },
+          error: err instanceof Error ? err : { message: String(err) },
+        });
       }
       throw err;
     }
@@ -407,6 +442,18 @@ export class TransactionsService {
           });
 
           return { fraudReason: preFraudResult.reason };
+        });
+
+        this.structuredLogger.warn(TransactionsService.name, 'Transfer rejected by fraud policy', {
+          eventType: 'TRANSACTION',
+          action: 'FRAUD_REJECTED',
+          transactionType: TransactionType.TRANSFER,
+          userId,
+          referenceId,
+          fromAccountId,
+          toAccountId,
+          amount,
+          fraudRule: rejected.fraudReason,
         });
 
         throw new BadRequestException(
@@ -524,7 +571,6 @@ export class TransactionsService {
             amount,
             referenceId,
             userId,
-            status: 'SUCCESS',
           });
           return result.dto;
         } catch (err) {
@@ -535,7 +581,7 @@ export class TransactionsService {
           ) {
             this.structuredLogger.warn(TransactionsService.name, 'Transfer retry due to transaction conflict', {
               eventType: 'TRANSACTION',
-              action: 'TRANSFER',
+              action: 'TRANSFER_RETRY',
               retryAttempt: attempt + 1,
               fromAccountId,
               toAccountId,
@@ -549,6 +595,18 @@ export class TransactionsService {
         }
       }
 
+      this.structuredLogger.error(TransactionsService.name, 'Transfer retries exhausted', {
+        details: {
+          eventType: 'TRANSACTION',
+          action: 'TRANSFER_RETRY_EXHAUSTED',
+          maxAttempts: this.transferRetryAttempts,
+          fromAccountId,
+          toAccountId,
+          referenceId,
+          userId,
+        },
+        error: lastError instanceof Error ? lastError : { message: String(lastError) },
+      });
       throw lastError;
     } catch (err) {
       const errorCode =
@@ -579,6 +637,20 @@ export class TransactionsService {
       });
       if (fallback) {
         return fallback;
+      }
+      if (!(err instanceof HttpException)) {
+        this.structuredLogger.error(TransactionsService.name, 'Transfer failed due to unexpected technical error', {
+          details: {
+            eventType: 'TRANSACTION',
+            action: 'TRANSFER',
+            userId,
+            referenceId,
+            fromAccountId,
+            toAccountId,
+            amount,
+          },
+          error: err instanceof Error ? err : { message: String(err) },
+        });
       }
       throw err;
     }

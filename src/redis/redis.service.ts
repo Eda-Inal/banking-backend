@@ -25,10 +25,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.client = new Redis(url);
 
     this.client.on('error', (err) => {
-      this.structuredLogger.warn(RedisService.name, 'Redis connection error', {
-        eventType: 'INFRA',
-        action: 'REDIS_ERROR',
-        error: err?.message ?? String(err),
+      this.structuredLogger.error(RedisService.name, 'Redis connection error', {
+        details: {
+          eventType: 'INFRA',
+          action: 'REDIS_ERROR',
+        },
+        error: err instanceof Error ? err : { message: String(err) },
       });
     });
   }
@@ -41,7 +43,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         this.structuredLogger.warn(RedisService.name, 'Redis quit error', {
           eventType: 'INFRA',
           action: 'REDIS_QUIT_ERROR',
-          error: (err as Error)?.message ?? String(err),
+          failure: (err as Error)?.message ?? String(err),
         });
       }
       this.client = null;

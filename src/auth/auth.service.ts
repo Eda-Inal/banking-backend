@@ -27,6 +27,20 @@ interface RefreshResult extends LoginResponseDto {
     refreshToken: string;
 }
 
+const maskEmailForLog = (email: string): string => {
+    const normalized = email.trim().toLowerCase();
+    const [localPart, domainPart] = normalized.split('@');
+    if (!localPart || !domainPart) return '***';
+
+    const maskedLocal = `${localPart[0] ?? '*'}***`;
+    const domainParts = domainPart.split('.');
+    const root = domainParts[0];
+    const suffix = domainParts.slice(1).join('.');
+    const maskedRoot = `${root?.[0] ?? '*'}***`;
+
+    return suffix ? `${maskedLocal}@${maskedRoot}.${suffix}` : `${maskedLocal}@${maskedRoot}`;
+};
+
 @Injectable()
 export class AuthService {
     constructor(
@@ -52,7 +66,7 @@ export class AuthService {
             this.structuredLogger.warn(AuthService.name, 'Register attempt with existing email', {
                 eventType: 'AUTH',
                 action: 'REGISTER',
-                email,
+                emailMasked: maskEmailForLog(email),
             });
             throw new ConflictException('Customer already exists');
         }
@@ -78,11 +92,18 @@ export class AuthService {
                 this.structuredLogger.warn(AuthService.name, 'Register unique conflict', {
                     eventType: 'AUTH',
                     action: 'REGISTER',
-                    email,
+                    emailMasked: maskEmailForLog(email),
                     code: 'P2002',
                 });
                 throw new ConflictException('Customer already exists');
             }
+            this.structuredLogger.error(AuthService.name, 'Register failed due to unexpected technical error', {
+                details: {
+                    eventType: 'AUTH',
+                    action: 'REGISTER',
+                },
+                error: err instanceof Error ? err : { message: String(err) },
+            });
             throw err;
         }
         await this.audit.recordSuccess({
@@ -98,7 +119,6 @@ export class AuthService {
             eventType: 'AUTH',
             action: 'REGISTER',
             userId: registeredCustomer.id,
-            email: registeredCustomer.email,
         });
 
         return {
@@ -123,13 +143,20 @@ export class AuthService {
             this.structuredLogger.warn(AuthService.name, 'Login attempt with invalid email', {
                 eventType: 'AUTH',
                 action: 'LOGIN',
-                email,
+                outcome: 'EMAIL_NOT_FOUND',
+                emailMasked: maskEmailForLog(email),
             });
-         
             throw new UnauthorizedException('Invalid credentials');
         }
         const now = new Date();
         if (customer.lockUntil && customer.lockUntil > now) {
+            this.structuredLogger.warn(AuthService.name, 'Login attempt on locked account', {
+                eventType: 'AUTH',
+                action: 'LOGIN',
+                outcome: 'ACCOUNT_LOCKED',
+                userId: customer.id,
+                lockUntil: customer.lockUntil.toISOString(),
+            });
             throw new AccountLockedException('Account temporarily locked due to too many failed attempts. Try again later.');
         }
         const threshold = Number(this.config.get(CONFIG_KEYS.LOGIN_LOCK_THRESHOLD)) || 5;
@@ -141,8 +168,8 @@ export class AuthService {
             this.structuredLogger.warn(AuthService.name, 'Login failed: invalid password', {
                 eventType: 'AUTH',
                 action: 'LOGIN',
+                outcome: 'INVALID_PASSWORD',
                 userId: customer.id,
-                email: customer.email,
             });
             const rows = await this.prisma.$queryRaw<
                 { failed_login_attempts: number; lock_until: Date | null }[]
@@ -169,8 +196,9 @@ export class AuthService {
                 this.structuredLogger.warn(AuthService.name, 'Account locked due to failed attempts', {
                     eventType: 'AUTH',
                     action: 'LOGIN',
+                    outcome: 'ACCOUNT_LOCKED',
                     userId: customer.id,
-                    email: customer.email,
+                    failedAttempts: updated.failed_login_attempts,
                     lockUntil: updated.lock_until.toISOString(),
                 });
             }
@@ -210,27 +238,39 @@ export class AuthService {
         );
         const expiresAt = new Date(Date.now() + refreshTtlSeconds * 1000);
 
-        await this.prisma.$transaction(async (tx) => {
-            await tx.refreshToken.updateMany({
-                where: {
-                    customerId: customer.id,
-                    revokedAt: null,
-                },
-                data: {
-                    revokedAt: new Date(),
-                },
-            });
+        try {
+            await this.prisma.$transaction(async (tx) => {
+                await tx.refreshToken.updateMany({
+                    where: {
+                        customerId: customer.id,
+                        revokedAt: null,
+                    },
+                    data: {
+                        revokedAt: new Date(),
+                    },
+                });
 
-            await tx.refreshToken.create({
-                data: {
-                    customerId: customer.id,
-                    tokenHash: refreshTokenHash,
-                    expiresAt,
-                    ipAddress: clientIpMasked,
-                    userAgent,
-                },
+                await tx.refreshToken.create({
+                    data: {
+                        customerId: customer.id,
+                        tokenHash: refreshTokenHash,
+                        expiresAt,
+                        ipAddress: clientIpMasked,
+                        userAgent,
+                    },
+                });
             });
-        });
+        } catch (err) {
+            this.structuredLogger.error(AuthService.name, 'Login failed due to unexpected technical error', {
+                details: {
+                    eventType: 'AUTH',
+                    action: 'LOGIN',
+                    userId: customer.id,
+                },
+                error: err instanceof Error ? err : { message: String(err) },
+            });
+            throw err;
+        }
         await this.audit.recordSuccess({
             action: AuditAction.LOGIN,
             customerId: customer.id,
@@ -243,8 +283,6 @@ export class AuthService {
             eventType: 'AUTH',
             action: 'LOGIN',
             userId: customer.id,
-            email: customer.email,
-            success: true,
         });
 
         const { id, name } = customer;
@@ -314,40 +352,60 @@ export class AuthService {
         );
         const newExpiresAt = new Date(Date.now() + refreshTtlSeconds * 1000);
 
-        await this.prisma.$transaction(async (tx) => {
-            const newTokenRecord = await tx.refreshToken.create({
-                data: {
-                    customerId: customer.id,
-                    tokenHash: newTokenHash,
-                    expiresAt: newExpiresAt,
-                    ipAddress: clientIpMasked,
-                    userAgent,
-                },
-            });
+        try {
+            await this.prisma.$transaction(async (tx) => {
+                const newTokenRecord = await tx.refreshToken.create({
+                    data: {
+                        customerId: customer.id,
+                        tokenHash: newTokenHash,
+                        expiresAt: newExpiresAt,
+                        ipAddress: clientIpMasked,
+                        userAgent,
+                    },
+                });
 
-            const revoked = await tx.refreshToken.updateMany({
-                where: {
-                    id: refreshTokenRecord.id,
-                    revokedAt: null,
-                    replacedById: null,
-                    expiresAt: { gt: new Date() },
-                },
-                data: {
-                    revokedAt: new Date(),
-                    replacedById: newTokenRecord.id,
-                },
-            });
+                const revoked = await tx.refreshToken.updateMany({
+                    where: {
+                        id: refreshTokenRecord.id,
+                        revokedAt: null,
+                        replacedById: null,
+                        expiresAt: { gt: new Date() },
+                    },
+                    data: {
+                        revokedAt: new Date(),
+                        replacedById: newTokenRecord.id,
+                    },
+                });
 
-            if (revoked.count !== 1) {
-                throw new UnauthorizedException('Refresh token already used');
+                if (revoked.count !== 1) {
+                    this.structuredLogger.warn(AuthService.name, 'Refresh token reuse detected', {
+                        eventType: 'AUTH',
+                        action: 'REFRESH',
+                        outcome: 'TOKEN_REUSE_DETECTED',
+                        userId: customer.id,
+                        refreshTokenRecordId: refreshTokenRecord.id,
+                    });
+                    throw new UnauthorizedException('Refresh token already used');
+                }
+            });
+        } catch (err) {
+            if (!(err instanceof UnauthorizedException)) {
+                this.structuredLogger.error(AuthService.name, 'Refresh failed due to unexpected technical error', {
+                    details: {
+                        eventType: 'AUTH',
+                        action: 'REFRESH',
+                        userId: customer.id,
+                    },
+                    error: err instanceof Error ? err : { message: String(err) },
+                });
             }
-        });
+            throw err;
+        }
 
         this.structuredLogger.info(AuthService.name, 'Refresh token rotated', {
             eventType: 'AUTH',
             action: 'REFRESH',
             userId: customer.id,
-            email: customer.email,
         });
         await this.audit.recordSuccess({
             action: AuditAction.REFRESH,
@@ -403,6 +461,18 @@ export class AuthService {
                 entityId: refreshTokenRecord.customerId,
                 ipAddress: clientIpMasked,
                 userAgent,
+            });
+            this.structuredLogger.info(AuthService.name, 'Logout token revoked', {
+                eventType: 'AUTH',
+                action: 'LOGOUT',
+                userId: refreshTokenRecord.customerId,
+                tokenRevoked: true,
+            });
+        } else {
+            this.structuredLogger.info(AuthService.name, 'Logout without revocable token', {
+                eventType: 'AUTH',
+                action: 'LOGOUT',
+                tokenRevoked: false,
             });
         }
 

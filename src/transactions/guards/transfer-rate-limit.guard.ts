@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { RedisService } from '../../redis/redis.service';
+import { StructuredLogger } from '../../logger/structured-logger.service';
 
 const KEY_PREFIX = 'transfer:rate:user:';
 const WINDOW_SECONDS = 60;
@@ -14,11 +15,15 @@ const DEFAULT_LIMIT_PER_MINUTE = 10;
 
 @Injectable()
 export class TransferRateLimitGuard implements CanActivate {
-  constructor(private readonly redis: RedisService) {}
+  constructor(
+    private readonly redis: RedisService,
+    private readonly structuredLogger: StructuredLogger,
+  ) {}
 
   private async checkLimit(
     key: string,
     limit: number,
+    userId: string,
   ): Promise<void> {
     const client = this.redis.getClient();
     const count = await client.incr(key);
@@ -26,6 +31,13 @@ export class TransferRateLimitGuard implements CanActivate {
       await client.expire(key, WINDOW_SECONDS);
     }
     if (count > limit) {
+      this.structuredLogger.warn(TransferRateLimitGuard.name, 'Transfer rate limit hit', {
+        eventType: 'SECURITY',
+        action: 'TRANSFER_RATE_LIMIT_HIT',
+        userId,
+        count,
+        limit,
+      });
       throw new HttpException(
         'Too many transfer attempts. Try again later.',
         HttpStatus.TOO_MANY_REQUESTS,
@@ -43,7 +55,7 @@ export class TransferRateLimitGuard implements CanActivate {
 
       const minuteWindow = Math.floor(Date.now() / 60_000);
       const key = `${KEY_PREFIX}${userId}:${minuteWindow}`;
-      await this.checkLimit(key, DEFAULT_LIMIT_PER_MINUTE);
+      await this.checkLimit(key, DEFAULT_LIMIT_PER_MINUTE, userId);
       return true;
     } catch (err) {
       if (err instanceof HttpException) {

@@ -103,10 +103,34 @@ export class TransactionIdempotencyChecker {
     }
 
     if (byRef.status === TransactionStatus.PENDING) {
+      this.structuredLogger.warn(
+        TransactionIdempotencyChecker.name,
+        'P2002 fallback found pending transaction',
+        {
+          eventType: 'TRANSACTION',
+          action: type,
+          referenceId,
+          transactionId: byRef.id,
+          userId,
+          status: 'PENDING',
+        },
+      );
       throw new ConflictException(
         `${type} transaction is still in progress (referenceId=${referenceId})`,
       );
     }
+    this.structuredLogger.warn(
+      TransactionIdempotencyChecker.name,
+      'P2002 fallback found unexpected transaction status',
+      {
+        eventType: 'TRANSACTION',
+        action: type,
+        referenceId,
+        transactionId: byRef.id,
+        userId,
+        status: byRef.status,
+      },
+    );
     throw new BadRequestException(
       `${type} transaction has unexpected status: ${byRef.status}`,
     );

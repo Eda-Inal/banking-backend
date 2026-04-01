@@ -4,6 +4,7 @@ import { Action, AuditOutcome } from '../common/enums';
 import { RequestContext } from '../common/request-context/request-context';
 import type { TransactionEventMetadata } from '../common/transaction-event.contract';
 import { Prisma } from '../generated/prisma/client';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 export type AuditRecordInput = {
     action: Action
@@ -22,7 +23,10 @@ export type AuditRecordInput = {
 
   @Injectable()
   export class AuditService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+      private readonly prisma: PrismaService,
+      private readonly structuredLogger: StructuredLogger,
+    ) {}
 
     recordSuccess(input: AuditRecordInput) {
       return this.record({ ...input, outcome: AuditOutcome.SUCCESS });
@@ -41,21 +45,37 @@ export type AuditRecordInput = {
       const ipAddress = input.ipAddress ?? ctx.clientIpMasked ?? null;
       const userAgent = input.userAgent ?? ctx.userAgent ?? null;
 
-      return this.prisma.auditLog.create({
-        data: {
-          action: input.action,
-          outcome: input.outcome,
-          customerId: input.customerId,
-          entityType: input.entityType,
-          entityId: input.entityId,
-          actorId,
-          resourceId,
-          traceId,
-          reasonCode: input.reasonCode,
-          metadata: input.metadata,
-          ipAddress: ipAddress ?? undefined,
-          userAgent: userAgent ?? undefined,
-        },
-      }) as unknown as Promise<void>;
+      return this.prisma.auditLog
+        .create({
+          data: {
+            action: input.action,
+            outcome: input.outcome,
+            customerId: input.customerId,
+            entityType: input.entityType,
+            entityId: input.entityId,
+            actorId,
+            resourceId,
+            traceId,
+            reasonCode: input.reasonCode,
+            metadata: input.metadata,
+            ipAddress: ipAddress ?? undefined,
+            userAgent: userAgent ?? undefined,
+          },
+        })
+        .catch((error: unknown) => {
+          this.structuredLogger.error(AuditService.name, 'Audit record write failed', {
+            details: {
+              eventType: 'AUDIT',
+              action: 'RECORD',
+              auditAction: input.action,
+              outcome: input.outcome ?? null,
+              customerId: input.customerId,
+              entityType: input.entityType,
+              entityId: input.entityId,
+            },
+            error: error instanceof Error ? error : { message: String(error) },
+          });
+          throw error;
+        }) as unknown as Promise<void>;
     }
   }

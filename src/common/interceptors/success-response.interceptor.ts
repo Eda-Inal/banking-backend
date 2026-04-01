@@ -8,9 +8,9 @@ export class SuccessResponseInterceptor implements NestInterceptor {
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     const http = context.switchToHttp();
-    const request = http.getRequest<{ method: string; url: string; originalUrl?: string; traceId?: string }>();
+    const request = http.getRequest<{ method: string; url: string; originalUrl?: string }>();
     const response = http.getResponse<{ statusCode: number }>();
-    const { method, url, traceId } = request;
+    const { method, url } = request;
     const requestPath = request.originalUrl || url;
     const startedAt = Date.now();
 
@@ -25,7 +25,6 @@ export class SuccessResponseInterceptor implements NestInterceptor {
             path: requestPath,
             statusCode: response.statusCode,
             durationMs,
-            traceId,
           });
         }),
       );
@@ -41,7 +40,6 @@ export class SuccessResponseInterceptor implements NestInterceptor {
           path: requestPath,
           statusCode: response.statusCode,
           durationMs,
-          traceId,
         });
       }),
       map((data) => ({

@@ -23,13 +23,6 @@ export class AccountsService {
             where: { customerId: userId },
         });
 
-        this.structuredLogger.info(AccountsService.name, 'Accounts fetched', {
-            eventType: 'ACCOUNT',
-            action: 'LIST',
-            userId,
-            count: accounts.length,
-        });
-
         return accounts.map(accountMapper.toResponseDto);
     }
 
@@ -46,13 +39,6 @@ export class AccountsService {
             });
             throw new NotFoundException('Account not found');
         }
-
-        this.structuredLogger.info(AccountsService.name, 'Account fetched', {
-            eventType: 'ACCOUNT',
-            action: 'GET_BY_ID',
-            userId,
-            accountId: id,
-        });
 
         return accountMapper.toResponseDto(account);
     }
@@ -101,6 +87,15 @@ export class AccountsService {
                 });
                 throw new ConflictException(`You already have an account with ${currency}`);
             }
+            this.structuredLogger.error(AccountsService.name, 'Account create failed unexpectedly', {
+                details: {
+                    eventType: 'ACCOUNT',
+                    action: 'CREATE',
+                    userId,
+                    currency,
+                },
+                error: err instanceof Error ? err : { message: String(err) },
+            });
             throw err;
         }
         await this.prisma.auditLog.create({
@@ -149,6 +144,7 @@ export class AccountsService {
                 this.structuredLogger.warn(AccountsService.name, 'Freeze skipped: already frozen', { eventType: 'ACCOUNT', action: 'FREEZE', userId, accountId: id });
                 throw new BadRequestException('Account is already frozen');
             }
+            this.structuredLogger.warn(AccountsService.name, 'Freeze failed: account state changed', { eventType: 'ACCOUNT', action: 'FREEZE', userId, accountId: id });
             throw new BadRequestException('Account state changed, try again');
         }
         await this.prisma.auditLog.create({
@@ -197,6 +193,7 @@ export class AccountsService {
                 this.structuredLogger.warn(AccountsService.name, 'Unfreeze skipped: already active', { eventType: 'ACCOUNT', action: 'UNFREEZE', userId, accountId: id });
                 throw new BadRequestException('Account is already active');
             }
+            this.structuredLogger.warn(AccountsService.name, 'Unfreeze failed: account state changed', { eventType: 'ACCOUNT', action: 'UNFREEZE', userId, accountId: id });
             throw new BadRequestException('Account state changed, try again');
         }
         await this.prisma.auditLog.create({
@@ -246,6 +243,7 @@ export class AccountsService {
                 this.structuredLogger.warn(AccountsService.name, 'Close failed: non-zero balance', { eventType: 'ACCOUNT', action: 'CLOSE', userId, accountId: id, balance: account.balance.toString() });
                 throw new BadRequestException('Account balance must be zero to close account');
             }
+            this.structuredLogger.warn(AccountsService.name, 'Close failed: account state changed', { eventType: 'ACCOUNT', action: 'CLOSE', userId, accountId: id });
             throw new BadRequestException('Account state changed, try again');
         }
         await this.prisma.auditLog.create({
