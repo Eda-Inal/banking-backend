@@ -1,16 +1,15 @@
 import {
   Injectable,
-  Logger,
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CONFIG_KEYS } from '../config/config';
 import { OutboxService } from './outbox.service';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 @Injectable()
 export class OutboxWorker implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(OutboxWorker.name);
   private timer: NodeJS.Timeout | null = null;
   private isRunning = false;
   private readonly pollIntervalMs: number;
@@ -18,6 +17,7 @@ export class OutboxWorker implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly config: ConfigService,
     private readonly outboxService: OutboxService,
+    private readonly structuredLogger: StructuredLogger,
   ) {
     this.pollIntervalMs = this.parsePositiveInt(
       this.config.get<string>(CONFIG_KEYS.OUTBOX_POLL_INTERVAL_MS),
@@ -30,7 +30,11 @@ export class OutboxWorker implements OnModuleInit, OnModuleDestroy {
       void this.tick();
     }, this.pollIntervalMs);
 
-    this.logger.log(`Outbox worker started (poll=${this.pollIntervalMs}ms)`);
+    this.structuredLogger.info(OutboxWorker.name, 'Outbox worker started', {
+      eventType: 'OUTBOX',
+      action: 'WORKER_START',
+      pollIntervalMs: this.pollIntervalMs,
+    });
   }
 
   onModuleDestroy(): void {
@@ -38,7 +42,10 @@ export class OutboxWorker implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.logger.log('Outbox worker stopped');
+    this.structuredLogger.info(OutboxWorker.name, 'Outbox worker stopped', {
+      eventType: 'OUTBOX',
+      action: 'WORKER_STOP',
+    });
   }
 
   private async tick(): Promise<void> {
@@ -48,11 +55,13 @@ export class OutboxWorker implements OnModuleInit, OnModuleDestroy {
     try {
       await this.outboxService.processPendingEvents();
     } catch (error) {
-      this.logger.error(
-        `Outbox tick error: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.structuredLogger.error(OutboxWorker.name, 'Outbox tick error', {
+        details: {
+          eventType: 'OUTBOX',
+          action: 'WORKER_TICK_ERROR',
+        },
+        error: error instanceof Error ? error : { message: String(error) },
+      });
     } finally {
       this.isRunning = false;
     }

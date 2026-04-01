@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { FraudService } from '../fraud/fraud.service';
@@ -14,12 +14,12 @@ import { TransactionAccountValidator } from './transaction-account-validator';
 import { TransactionIdempotencyChecker } from './transaction-idempotency-checker';
 import { TransactionRepository } from './transaction-repository';
 import { TransactionEventWriter } from './transaction-event-writer';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 type TransferTxResult = { kind: 'SUCCESS'; dto: TransactionResponseDto };
 
 @Injectable()
 export class TransactionsService {
-  private readonly logger = new Logger(TransactionsService.name);
   private readonly transferRetryAttempts = 3;
 
   constructor(
@@ -29,6 +29,7 @@ export class TransactionsService {
     private readonly idempotencyChecker: TransactionIdempotencyChecker,
     private readonly transactionRepository: TransactionRepository,
     private readonly transactionEventWriter: TransactionEventWriter,
+    private readonly structuredLogger: StructuredLogger,
   ) {}
 
   private isRetryableTransactionError(err: unknown): boolean {
@@ -137,9 +138,16 @@ export class TransactionsService {
         return transactionMapper.toResponseDto(completedTransaction);
       });
 
-      this.logger.log(
-        `Deposit completed: transactionId=${result.id}, toAccountId=${toAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`,
-      );
+      this.structuredLogger.info(TransactionsService.name, 'Deposit completed', {
+        eventType: 'TRANSACTION',
+        action: 'DEPOSIT',
+        transactionId: result.id,
+        toAccountId,
+        amount,
+        referenceId,
+        userId,
+        status: 'SUCCESS',
+      });
       return result;
     } catch (err) {
       const fallback = await this.idempotencyChecker.resolveP2002Fallback({
@@ -290,9 +298,16 @@ export class TransactionsService {
         return transactionMapper.toResponseDto(completedTransaction);
       });
 
-      this.logger.log(
-        `Withdraw completed: transactionId=${result.id}, fromAccountId=${fromAccountId}, amount=${amount}, referenceId=${referenceId}, user=${userId}`,
-      );
+      this.structuredLogger.info(TransactionsService.name, 'Withdraw completed', {
+        eventType: 'TRANSACTION',
+        action: 'WITHDRAW',
+        transactionId: result.id,
+        fromAccountId,
+        amount,
+        referenceId,
+        userId,
+        status: 'SUCCESS',
+      });
       return result;
     } catch (err) {
       const errorCode =
@@ -500,9 +515,17 @@ export class TransactionsService {
         };
           })) as TransferTxResult;
 
-          this.logger.log(
-            `Transfer completed: txId=${result.dto.id}, from=${fromAccountId}, to=${toAccountId}, amount=${amount}`,
-          );
+          this.structuredLogger.info(TransactionsService.name, 'Money transfer completed', {
+            eventType: 'TRANSACTION',
+            action: 'TRANSFER',
+            transactionId: result.dto.id,
+            fromAccountId,
+            toAccountId,
+            amount,
+            referenceId,
+            userId,
+            status: 'SUCCESS',
+          });
           return result.dto;
         } catch (err) {
           lastError = err;
@@ -510,9 +533,15 @@ export class TransactionsService {
             attempt < this.transferRetryAttempts - 1 &&
             this.isRetryableTransactionError(err)
           ) {
-            this.logger.warn(
-              `Transfer retry due to transaction conflict. attempt=${attempt + 1}, from=${fromAccountId}, to=${toAccountId}, referenceId=${referenceId}`,
-            );
+            this.structuredLogger.warn(TransactionsService.name, 'Transfer retry due to transaction conflict', {
+              eventType: 'TRANSACTION',
+              action: 'TRANSFER',
+              retryAttempt: attempt + 1,
+              fromAccountId,
+              toAccountId,
+              referenceId,
+              userId,
+            });
             await this.backoffDelay(attempt);
             continue;
           }

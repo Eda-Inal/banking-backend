@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, Logger, ConflictException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AccountResponseDto } from './dto/account-response.dto';
 import { accountMapper } from './accounts.mapper';
@@ -7,21 +7,28 @@ import { AccountStatus } from '../common/enums';
 import { RequestContext } from '../common/request-context/request-context';
 import { Action as PrismaAction } from '../generated/prisma/enums';
 import { Prisma } from '../generated/prisma/client';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 
 
 @Injectable()
 export class AccountsService {
-    private readonly logger = new Logger(AccountsService.name);
-
-    constructor(private readonly prisma: PrismaService) { }
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly structuredLogger: StructuredLogger,
+    ) { }
 
     async getAccounts(userId: string): Promise<AccountResponseDto[]> {
         const accounts = await this.prisma.account.findMany({
             where: { customerId: userId },
         });
 
-        this.logger.log(`Accounts fetched for user ${userId} (count: ${accounts.length})`);
+        this.structuredLogger.info(AccountsService.name, 'Accounts fetched', {
+            eventType: 'ACCOUNT',
+            action: 'LIST',
+            userId,
+            count: accounts.length,
+        });
 
         return accounts.map(accountMapper.toResponseDto);
     }
@@ -31,11 +38,21 @@ export class AccountsService {
             where: { id, customerId: userId },
         });
         if (!account) {
-            this.logger.warn(`getAccountById: account not found for user ${userId}, accountId ${id}`);
+            this.structuredLogger.warn(AccountsService.name, 'Account not found', {
+                eventType: 'ACCOUNT',
+                action: 'GET_BY_ID',
+                userId,
+                accountId: id,
+            });
             throw new NotFoundException('Account not found');
         }
 
-        this.logger.log(`Account fetched: ${id} for user ${userId}`);
+        this.structuredLogger.info(AccountsService.name, 'Account fetched', {
+            eventType: 'ACCOUNT',
+            action: 'GET_BY_ID',
+            userId,
+            accountId: id,
+        });
 
         return accountMapper.toResponseDto(account);
     }
@@ -52,7 +69,12 @@ export class AccountsService {
             },
         });
         if (accountExists) {
-            this.logger.warn(`createAccount: account already exists for user ${userId}, currency ${currency}`);
+            this.structuredLogger.warn(AccountsService.name, 'Account already exists', {
+                eventType: 'ACCOUNT',
+                action: 'CREATE',
+                userId,
+                currency,
+            });
             throw new ConflictException(`You already have an account with ${currency}`);
         }
 
@@ -70,7 +92,13 @@ export class AccountsService {
                 // Backstop for concurrent account creation attempts:
                 // Prisma schema cannot express this conditional uniqueness, so a DB partial unique
                 // index (added via SQL migration) enforces one non-CLOSED account per user/currency.
-                this.logger.warn(`createAccount: unique conflict for user ${userId}, currency ${currency}`);
+                this.structuredLogger.warn(AccountsService.name, 'Account create unique conflict', {
+                    eventType: 'ACCOUNT',
+                    action: 'CREATE',
+                    userId,
+                    currency,
+                    code: 'P2002',
+                });
                 throw new ConflictException(`You already have an account with ${currency}`);
             }
             throw err;
@@ -85,7 +113,13 @@ export class AccountsService {
                 userAgent,
             },
         });
-        this.logger.log(`Account created: ${account.id} for user ${userId}`);
+        this.structuredLogger.info(AccountsService.name, 'Account created', {
+            eventType: 'ACCOUNT',
+            action: 'CREATE',
+            userId,
+            accountId: account.id,
+            currency,
+        });
         return accountMapper.toResponseDto(account);
     }
 
@@ -104,15 +138,15 @@ export class AccountsService {
                 where: { id, customerId: userId },
             });
             if (!account) {
-                this.logger.warn(`freezeAccount: account not found for user ${userId}, accountId ${id}`);
+                this.structuredLogger.warn(AccountsService.name, 'Freeze failed: account not found', { eventType: 'ACCOUNT', action: 'FREEZE', userId, accountId: id });
                 throw new NotFoundException('Account not found');
             }
             if (account.status === AccountStatus.CLOSED) {
-                this.logger.warn(`freezeAccount: account is closed for user ${userId}, accountId ${id}`);
+                this.structuredLogger.warn(AccountsService.name, 'Freeze failed: account is closed', { eventType: 'ACCOUNT', action: 'FREEZE', userId, accountId: id });
                 throw new BadRequestException('Account is closed');
             }
             if (account.status === AccountStatus.FROZEN) {
-                this.logger.warn(`freezeAccount: account is already frozen for user ${userId}, accountId ${id}`);
+                this.structuredLogger.warn(AccountsService.name, 'Freeze skipped: already frozen', { eventType: 'ACCOUNT', action: 'FREEZE', userId, accountId: id });
                 throw new BadRequestException('Account is already frozen');
             }
             throw new BadRequestException('Account state changed, try again');
@@ -133,7 +167,7 @@ export class AccountsService {
         if (!account) {
             throw new NotFoundException('Account not found');
         }
-        this.logger.log(`Account frozen: ${id} for user ${userId}`);
+        this.structuredLogger.info(AccountsService.name, 'Account frozen', { eventType: 'ACCOUNT', action: 'FREEZE', userId, accountId: id });
         return accountMapper.toResponseDto(account);
     }
 
@@ -152,15 +186,15 @@ export class AccountsService {
                 where: { id, customerId: userId },
             });
             if (!account) {
-                this.logger.warn(`unfreezeAccount: account not found for user ${userId}, accountId ${id}`);
+                this.structuredLogger.warn(AccountsService.name, 'Unfreeze failed: account not found', { eventType: 'ACCOUNT', action: 'UNFREEZE', userId, accountId: id });
                 throw new NotFoundException('Account not found');
             }
             if (account.status === AccountStatus.CLOSED) {
-                this.logger.warn(`unfreezeAccount: account is closed for user ${userId}, accountId ${id}`);
+                this.structuredLogger.warn(AccountsService.name, 'Unfreeze failed: account is closed', { eventType: 'ACCOUNT', action: 'UNFREEZE', userId, accountId: id });
                 throw new BadRequestException('Account is closed');
             }
             if (account.status === AccountStatus.ACTIVE) {
-                this.logger.warn(`unfreezeAccount: account is already active for user ${userId}, accountId ${id}`);
+                this.structuredLogger.warn(AccountsService.name, 'Unfreeze skipped: already active', { eventType: 'ACCOUNT', action: 'UNFREEZE', userId, accountId: id });
                 throw new BadRequestException('Account is already active');
             }
             throw new BadRequestException('Account state changed, try again');
@@ -181,7 +215,7 @@ export class AccountsService {
         if (!account) {
             throw new NotFoundException('Account not found');
         }
-        this.logger.log(`Account unfrozen: ${id} for user ${userId}`);
+        this.structuredLogger.info(AccountsService.name, 'Account unfrozen', { eventType: 'ACCOUNT', action: 'UNFREEZE', userId, accountId: id });
         return accountMapper.toResponseDto(account);
     }
 
@@ -201,15 +235,15 @@ export class AccountsService {
                 where: { id, customerId: userId },
             });
             if (!account) {
-                this.logger.warn(`closeAccount: account not found for user ${userId}, accountId ${id}`);
+                this.structuredLogger.warn(AccountsService.name, 'Close failed: account not found', { eventType: 'ACCOUNT', action: 'CLOSE', userId, accountId: id });
                 throw new NotFoundException('Account not found');
             }
             if (account.status === AccountStatus.CLOSED) {
-                this.logger.warn(`closeAccount: account is already closed for user ${userId}, accountId ${id}`);
+                this.structuredLogger.warn(AccountsService.name, 'Close skipped: already closed', { eventType: 'ACCOUNT', action: 'CLOSE', userId, accountId: id });
                 throw new BadRequestException('Account is already closed');
             }
             if (!account.balance.eq(new Prisma.Decimal(0))) {
-                this.logger.warn(`closeAccount: non-zero balance for user ${userId}, accountId ${id}, balance ${account.balance}`);
+                this.structuredLogger.warn(AccountsService.name, 'Close failed: non-zero balance', { eventType: 'ACCOUNT', action: 'CLOSE', userId, accountId: id, balance: account.balance.toString() });
                 throw new BadRequestException('Account balance must be zero to close account');
             }
             throw new BadRequestException('Account state changed, try again');
@@ -230,7 +264,7 @@ export class AccountsService {
         if (!account) {
             throw new NotFoundException('Account not found');
         }
-        this.logger.log(`Account closed: ${id} for user ${userId}`);
+        this.structuredLogger.info(AccountsService.name, 'Account closed', { eventType: 'ACCOUNT', action: 'CLOSE', userId, accountId: id });
         return accountMapper.toResponseDto(account);
     }
 }

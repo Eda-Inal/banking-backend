@@ -2,14 +2,14 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 @Injectable()
 export class TransactionAccountValidator {
-  private readonly logger = new Logger(TransactionAccountValidator.name);
+  constructor(private readonly structuredLogger: StructuredLogger) {}
 
   async getAccountOrThrow(
     tx: Prisma.TransactionClient,
@@ -20,7 +20,12 @@ export class TransactionAccountValidator {
       where: { id: accountId },
     });
     if (!account) {
-      this.logger.warn(`${logContext}: account not found accountId=${accountId}`);
+      this.structuredLogger.warn(TransactionAccountValidator.name, 'Account not found', {
+        eventType: 'TRANSACTION',
+        action: 'ACCOUNT_VALIDATE',
+        logContext,
+        accountId,
+      });
       throw new NotFoundException('Account not found');
     }
     return account;
@@ -33,9 +38,13 @@ export class TransactionAccountValidator {
     accountId: string,
   ) {
     if (accountCustomerId !== userId) {
-      this.logger.warn(
-        `${logContext}: forbidden, accountId=${accountId} not owned by user=${userId}`,
-      );
+      this.structuredLogger.warn(TransactionAccountValidator.name, 'Account ownership validation failed', {
+        eventType: 'TRANSACTION',
+        action: 'ACCOUNT_VALIDATE',
+        logContext,
+        accountId,
+        userId,
+      });
       throw new ForbiddenException('Account not found');
     }
   }
@@ -48,9 +57,14 @@ export class TransactionAccountValidator {
     message: string,
   ) {
     if (accountStatus !== 'ACTIVE') {
-      this.logger.warn(
-        `${logContext}: account not active accountId=${accountId}, status=${accountStatus}, user=${userId}`,
-      );
+      this.structuredLogger.warn(TransactionAccountValidator.name, 'Account active-state validation failed', {
+        eventType: 'TRANSACTION',
+        action: 'ACCOUNT_VALIDATE',
+        logContext,
+        accountId,
+        accountStatus,
+        userId,
+      });
       throw new BadRequestException(message);
     }
   }
@@ -65,9 +79,15 @@ export class TransactionAccountValidator {
     message: string,
   ) {
     if (balance.lt(amount)) {
-      this.logger.warn(
-        `${logContext}: account balance not enough accountId=${accountId}, balance=${balance}, amount=${rawAmount}, user=${userId}`,
-      );
+      this.structuredLogger.warn(TransactionAccountValidator.name, 'Insufficient balance', {
+        eventType: 'TRANSACTION',
+        action: 'ACCOUNT_VALIDATE',
+        logContext,
+        accountId,
+        balance: balance.toString(),
+        amount: rawAmount,
+        userId,
+      });
       throw new BadRequestException(message);
     }
   }

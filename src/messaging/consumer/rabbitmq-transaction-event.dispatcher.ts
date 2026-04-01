@@ -1,16 +1,18 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { AuditService } from '../../audit/audit.service';
 import { Action, EventType, TransactionType } from '../../common/enums';
 import { Prisma } from '../../generated/prisma/client';
 import type { ConsumedEventMessage } from './consumed-event.types';
 import { PermanentConsumerError } from './consumer.errors';
 import { validateTransactionEventPayload } from './transaction-event-payload.validator';
+import { StructuredLogger } from '../../logger/structured-logger.service';
 
 @Injectable()
 export class RabbitMqTransactionEventDispatcher {
-  private readonly logger = new Logger(RabbitMqTransactionEventDispatcher.name);
-
-  constructor(private readonly audit: AuditService) {}
+  constructor(
+    private readonly audit: AuditService,
+    private readonly structuredLogger: StructuredLogger,
+  ) {}
 
   async dispatch(message: ConsumedEventMessage): Promise<void> {
     switch (message.type) {
@@ -38,9 +40,13 @@ export class RabbitMqTransactionEventDispatcher {
           metadata: payload.metadata as Prisma.InputJsonValue,
         });
 
-        this.logger.log(
-          `Handled TRANSACTION_COMPLETED tx=${payload.resourceId} actor=${payload.actorId} trace=${payload.traceId}`,
-        );
+        this.structuredLogger.info(RabbitMqTransactionEventDispatcher.name, 'Handled TRANSACTION_COMPLETED', {
+          eventType: 'MESSAGING',
+          action: 'DISPATCH_COMPLETED',
+          transactionId: payload.resourceId,
+          actorId: payload.actorId,
+          traceId: payload.traceId,
+        });
         return;
       }
 
@@ -69,9 +75,14 @@ export class RabbitMqTransactionEventDispatcher {
           metadata: payload.metadata as Prisma.InputJsonValue,
         });
 
-        this.logger.warn(
-          `Handled TRANSACTION_FAILED tx=${payload.resourceId} actor=${payload.actorId} trace=${payload.traceId} reasonCode=${payload.reasonCode ?? 'n/a'}`,
-        );
+        this.structuredLogger.warn(RabbitMqTransactionEventDispatcher.name, 'Handled TRANSACTION_FAILED', {
+          eventType: 'MESSAGING',
+          action: 'DISPATCH_FAILED',
+          transactionId: payload.resourceId,
+          actorId: payload.actorId,
+          traceId: payload.traceId,
+          reasonCode: payload.reasonCode ?? null,
+        });
         return;
       }
 

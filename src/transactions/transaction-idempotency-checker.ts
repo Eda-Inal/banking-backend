@@ -1,15 +1,17 @@
-import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TransactionResponseDto } from './dto/transaction-response.dto';
 import { transactionMapper } from './transactions.mapper';
 import { TransactionStatus, TransactionType } from '../common/enums';
 import { getFraudRejectionMessage } from '../fraud/fraud-user-messages';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 @Injectable()
 export class TransactionIdempotencyChecker {
-  private readonly logger = new Logger(TransactionIdempotencyChecker.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly structuredLogger: StructuredLogger,
+  ) {}
 
   async findExisting(
     userId: string,
@@ -31,9 +33,14 @@ export class TransactionIdempotencyChecker {
     if (!existing) return null;
 
     if (existing.status === TransactionStatus.COMPLETED) {
-      this.logger.log(
-        `${type} idempotent: referenceId ${referenceId}, transactionId ${existing.id}, user ${userId}`,
-      );
+      this.structuredLogger.info(TransactionIdempotencyChecker.name, 'Idempotent completed transaction reused', {
+        eventType: 'TRANSACTION',
+        action: type,
+        referenceId,
+        transactionId: existing.id,
+        userId,
+        status: 'COMPLETED',
+      });
       return transactionMapper.toResponseDto(existing);
     }
 
@@ -41,9 +48,14 @@ export class TransactionIdempotencyChecker {
       existing.status === TransactionStatus.REJECTED &&
       existing.fraudDecision === 'REJECT'
     ) {
-      this.logger.warn(
-        `${type} idempotent rejected: referenceId=${referenceId}, transactionId=${existing.id}, user=${userId}`,
-      );
+      this.structuredLogger.warn(TransactionIdempotencyChecker.name, 'Idempotent rejected transaction reused', {
+        eventType: 'TRANSACTION',
+        action: type,
+        referenceId,
+        transactionId: existing.id,
+        userId,
+        status: 'REJECTED',
+      });
       throw new BadRequestException(
         getFraudRejectionMessage(type, existing.fraudReason ?? undefined),
       );
@@ -68,9 +80,14 @@ export class TransactionIdempotencyChecker {
     const byRef = await this.findExisting(userId, type, referenceId);
     if (!byRef) return null;
 
-    this.logger.log(
-      `${type} P2002 idempotent: referenceId=${referenceId}, returned existing transactionId=${byRef.id}, user=${userId}`,
-    );
+    this.structuredLogger.info(TransactionIdempotencyChecker.name, 'P2002 fallback reused existing transaction', {
+      eventType: 'TRANSACTION',
+      action: type,
+      referenceId,
+      transactionId: byRef.id,
+      userId,
+      code: 'P2002',
+    });
 
     if (byRef.status === TransactionStatus.COMPLETED) {
       return transactionMapper.toResponseDto(byRef);

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, UnauthorizedException, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserMeResponseDto } from './dto/user-me-response.dto';
 import { userMapper } from './users.mapper';
@@ -9,15 +9,15 @@ import * as bcrypt from 'bcrypt';
 import { RequestContext } from '../common/request-context/request-context';
 import { Action as AuditAction } from '../common/enums';
 import { AuditService } from '../audit/audit.service';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 
 @Injectable()
 export class UsersService {
-    private readonly logger = new Logger(UsersService.name);
-
     constructor(
         private readonly prisma: PrismaService,
         private readonly audit: AuditService,
+        private readonly structuredLogger: StructuredLogger,
     ) { }
 
     async getMe(userId: string): Promise<UserMeResponseDto> {
@@ -26,7 +26,7 @@ export class UsersService {
             include: { accounts: true },
         });
         if (!user) {
-            this.logger.warn(`getMe: user not found for id ${userId}`);
+            this.structuredLogger.warn(UsersService.name, 'User not found in getMe', { eventType: 'USER', action: 'GET_ME', userId });
             throw new NotFoundException('User not found');
         }
         return userMapper.toMeResponseDto(user);
@@ -41,7 +41,7 @@ export class UsersService {
         });
 
         if (!user) {
-            this.logger.warn(`putMe: user not found for id ${userId}`);
+            this.structuredLogger.warn(UsersService.name, 'User not found in putMe', { eventType: 'USER', action: 'PUT_ME', userId });
             throw new NotFoundException('User not found');
         }
 
@@ -62,21 +62,19 @@ export class UsersService {
                 'code' in err &&
                 (err as { code?: string }).code === 'P2002';
             if (isP2002) {
-                this.logger.warn(`putMe: unique conflict for email ${email ?? '(unchanged)'} (user ${userId})`);
+                this.structuredLogger.warn(UsersService.name, 'User update unique conflict', { eventType: 'USER', action: 'PUT_ME', userId, email: email ?? null, code: 'P2002' });
                 throw new ConflictException('Email already exists');
             }
             throw err;
         }
 
-        this.logger.log(
-            `User profile updated: ${updatedUser.id} (${updatedUser.email}) - fields: ${[
-                email ? 'email' : null,
-                name ? 'name' : null,
-                phone ? 'phone' : null,
-            ]
-                .filter(Boolean)
-                .join(', ') || 'none'}`,
-        );
+        this.structuredLogger.info(UsersService.name, 'User profile updated', {
+            eventType: 'USER',
+            action: 'PUT_ME',
+            userId: updatedUser.id,
+            email: updatedUser.email,
+            updatedFields: [email ? 'email' : null, name ? 'name' : null, phone ? 'phone' : null].filter(Boolean),
+        });
 
         return userMapper.toMeResponseDto(updatedUser);
 
@@ -89,13 +87,18 @@ export class UsersService {
             where: { id: userId },
         });
         if (!user) {
-            this.logger.warn(`patchPassword: user not found for id ${userId}`);
+            this.structuredLogger.warn(UsersService.name, 'Password change failed: user not found', { eventType: 'USER', action: 'PATCH_PASSWORD', userId });
             throw new NotFoundException('User not found');
         }
 
         const isPasswordValid = await bcrypt.compare(oldPassword, user.passwordHash);
         if (!isPasswordValid) {
-            this.logger.warn(`patchPassword: invalid old password for user ${user.id} (${user.email})`);
+            this.structuredLogger.warn(UsersService.name, 'Password change failed: invalid old password', {
+                eventType: 'USER',
+                action: 'PATCH_PASSWORD',
+                userId: user.id,
+                email: user.email,
+            });
             throw new UnauthorizedException('Invalid old password');
         }
 
@@ -130,7 +133,12 @@ export class UsersService {
             ipAddress: clientIpMasked,
             userAgent,
         });
-        this.logger.log(`Password changed for user ${user.id} (${user.email})`);
+        this.structuredLogger.info(UsersService.name, 'Password changed', {
+            eventType: 'USER',
+            action: 'PATCH_PASSWORD',
+            userId: user.id,
+            email: user.email,
+        });
         return {
             message: 'Password updated successfully',
         };

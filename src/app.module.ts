@@ -1,4 +1,5 @@
 import { Module, MiddlewareConsumer } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -12,6 +13,8 @@ import { TransactionsModule } from './transactions/transactions.module';
 import { RabbitMqModule } from './messaging/rabbitmq.module';
 import { OutboxModule } from './outbox/outbox.module';
 import { AuditModule } from './audit/audit.module';
+import { LoggerModule } from './logger/logger.module';
+import { RequestContextUserInterceptor } from './common/interceptors/request-context-user.interceptor';
 
 @Module({
   imports: [
@@ -19,6 +22,7 @@ import { AuditModule } from './audit/audit.module';
       isGlobal: true,
       envFilePath: ['.env'],
     }),
+    LoggerModule,
     PrismaModule,
     RedisModule,
     AuthModule,
@@ -30,7 +34,13 @@ import { AuditModule } from './audit/audit.module';
     AuditModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: RequestContextUserInterceptor,
+    },
+  ],
 })
 export class AppModule {
   configure(consumer: MiddlewareConsumer) {

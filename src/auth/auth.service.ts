@@ -1,4 +1,4 @@
-import { Injectable, ConflictException, UnauthorizedException,Logger } from '@nestjs/common';
+import { Injectable, ConflictException, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { RegisterRequestDto } from './dto/register-request.dto';
 import { RegisterResponseDto } from './dto/register-response.dto';
@@ -17,6 +17,7 @@ import { Prisma } from '../generated/prisma/client';
 import { Action as AuditAction } from '../common/enums';
 import { RequestContext } from '../common/request-context/request-context';
 import { AuditService } from '../audit/audit.service';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 interface LoginWithRefresh extends LoginResponseDto {
     refreshToken: string;
@@ -28,12 +29,12 @@ interface RefreshResult extends LoginResponseDto {
 
 @Injectable()
 export class AuthService {
-    private readonly logger = new Logger(AuthService.name);
     constructor(
         private readonly prisma: PrismaService,
         private readonly jwtService: JwtService,
         private readonly config: ConfigService,
         private readonly audit: AuditService,
+        private readonly structuredLogger: StructuredLogger,
     ) { }
 
     async register(registerRequestDto: RegisterRequestDto): Promise<RegisterResponseDto> {
@@ -48,7 +49,11 @@ export class AuthService {
         });
 
         if (customer) {
-            this.logger.warn(`Register attempt with existing email: ${email}`);
+            this.structuredLogger.warn(AuthService.name, 'Register attempt with existing email', {
+                eventType: 'AUTH',
+                action: 'REGISTER',
+                email,
+            });
             throw new ConflictException('Customer already exists');
         }
 
@@ -70,7 +75,12 @@ export class AuthService {
                 'code' in err &&
                 (err as { code?: string }).code === 'P2002';
             if (isP2002) {
-                this.logger.warn(`Register unique conflict for email: ${email}`);
+                this.structuredLogger.warn(AuthService.name, 'Register unique conflict', {
+                    eventType: 'AUTH',
+                    action: 'REGISTER',
+                    email,
+                    code: 'P2002',
+                });
                 throw new ConflictException('Customer already exists');
             }
             throw err;
@@ -84,7 +94,12 @@ export class AuthService {
             userAgent,
         });
 
-        this.logger.log(`User registered: ${registeredCustomer.id} (${registeredCustomer.email})`);
+        this.structuredLogger.info(AuthService.name, 'User registered', {
+            eventType: 'AUTH',
+            action: 'REGISTER',
+            userId: registeredCustomer.id,
+            email: registeredCustomer.email,
+        });
 
         return {
             message: 'Customer registered successfully',
@@ -105,7 +120,11 @@ export class AuthService {
         });
 
         if (!customer) {
-            this.logger.warn(`Login attempt with invalid email: ${email}`);
+            this.structuredLogger.warn(AuthService.name, 'Login attempt with invalid email', {
+                eventType: 'AUTH',
+                action: 'LOGIN',
+                email,
+            });
          
             throw new UnauthorizedException('Invalid credentials');
         }
@@ -119,7 +138,12 @@ export class AuthService {
 
         const isPasswordValid = await bcrypt.compare(password, customer.passwordHash);
         if (!isPasswordValid) {
-            this.logger.warn(`Login failed: invalid password for user ${customer.id} (${customer.email})`);
+            this.structuredLogger.warn(AuthService.name, 'Login failed: invalid password', {
+                eventType: 'AUTH',
+                action: 'LOGIN',
+                userId: customer.id,
+                email: customer.email,
+            });
             const rows = await this.prisma.$queryRaw<
                 { failed_login_attempts: number; lock_until: Date | null }[]
             >(
@@ -142,9 +166,13 @@ export class AuthService {
             }
 
             if (updated.lock_until) {
-                this.logger.warn(
-                    `Account locked due to failed attempts: ${customer.id} (${customer.email}) until ${updated.lock_until}`,
-                );
+                this.structuredLogger.warn(AuthService.name, 'Account locked due to failed attempts', {
+                    eventType: 'AUTH',
+                    action: 'LOGIN',
+                    userId: customer.id,
+                    email: customer.email,
+                    lockUntil: updated.lock_until.toISOString(),
+                });
             }
             await this.audit.recordFailure({
                 action: AuditAction.LOGIN,
@@ -211,7 +239,13 @@ export class AuthService {
             ipAddress: clientIpMasked,
             userAgent,
         });
-        this.logger.log(`Login successful: ${customer.id} (${customer.email})`);
+        this.structuredLogger.info(AuthService.name, 'User login successful', {
+            eventType: 'AUTH',
+            action: 'LOGIN',
+            userId: customer.id,
+            email: customer.email,
+            success: true,
+        });
 
         const { id, name } = customer;
         const user = { id, email, name };
@@ -232,7 +266,10 @@ export class AuthService {
 
         const rawRefreshToken = req.cookies.refreshToken;
         if (!rawRefreshToken) {
-            this.logger.warn('Refresh failed: refresh token cookie missing');
+            this.structuredLogger.warn(AuthService.name, 'Refresh failed: token cookie missing', {
+                eventType: 'AUTH',
+                action: 'REFRESH',
+            });
             throw new UnauthorizedException('Refresh token is required');
         }
 
@@ -250,14 +287,19 @@ export class AuthService {
             },
         });
         if (!refreshTokenRecord) {
-            this.logger.warn('Refresh failed: token hash not found');
+            this.structuredLogger.warn(AuthService.name, 'Refresh failed: token hash not found', {
+                eventType: 'AUTH',
+                action: 'REFRESH',
+            });
             throw new UnauthorizedException('Invalid refresh token');
         }
         const customer = refreshTokenRecord.customer;
         if (!customer) {
-            this.logger.warn(
-                `Refresh failed: token record without customer (id: ${refreshTokenRecord.id})`,
-            );
+            this.structuredLogger.warn(AuthService.name, 'Refresh failed: token record without customer', {
+                eventType: 'AUTH',
+                action: 'REFRESH',
+                refreshTokenRecordId: refreshTokenRecord.id,
+            });
             throw new UnauthorizedException('Invalid refresh token');
         }
 
@@ -301,7 +343,12 @@ export class AuthService {
             }
         });
 
-        this.logger.log(`Refresh token rotated for user ${customer.id} (${customer.email})`);
+        this.structuredLogger.info(AuthService.name, 'Refresh token rotated', {
+            eventType: 'AUTH',
+            action: 'REFRESH',
+            userId: customer.id,
+            email: customer.email,
+        });
         await this.audit.recordSuccess({
             action: AuditAction.REFRESH,
             customerId: customer.id,

@@ -1,19 +1,21 @@
 import {
   Injectable,
-  Logger,
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { CONFIG_KEYS } from '../config/config';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(RedisService.name);
   private client: Redis | null = null;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly structuredLogger: StructuredLogger,
+  ) {}
 
   async onModuleInit() {
     const url = this.config.get<string>(CONFIG_KEYS.REDIS_URL);
@@ -23,7 +25,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.client = new Redis(url);
 
     this.client.on('error', (err) => {
-      this.logger.warn('Redis connection error', err?.message ?? err);
+      this.structuredLogger.warn(RedisService.name, 'Redis connection error', {
+        eventType: 'INFRA',
+        action: 'REDIS_ERROR',
+        error: err?.message ?? String(err),
+      });
     });
   }
 
@@ -32,7 +38,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       try {
         await this.client.quit();
       } catch (err) {
-        this.logger.warn('Redis quit error', (err as Error)?.message ?? err);
+        this.structuredLogger.warn(RedisService.name, 'Redis quit error', {
+          eventType: 'INFRA',
+          action: 'REDIS_QUIT_ERROR',
+          error: (err as Error)?.message ?? String(err),
+        });
       }
       this.client = null;
     }

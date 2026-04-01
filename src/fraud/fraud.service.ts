@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 
 import { FraudDecisionResult } from './types/fraud-decision-result.type';
 import { TransferFraudCheckInput } from './types/transfer-fraud-check-input.type';
@@ -7,16 +7,16 @@ import { WithdrawFraudCheckInput } from './types/withdraw-fraud-check-input.type
 import { TransferFraudRule, WithdrawFraudRule } from './rules/fraud-rule.interface';
 import { TRANSFER_FRAUD_RULES, WITHDRAW_FRAUD_RULES } from './fraud.constants';
 import type { Prisma } from '../generated/prisma/client';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 @Injectable()
 export class FraudService {
-  private readonly logger = new Logger(FraudService.name);
-
   constructor(
     @Inject(TRANSFER_FRAUD_RULES)
     private readonly transferRules: TransferFraudRule[],
     @Inject(WITHDRAW_FRAUD_RULES)
     private readonly withdrawRules: WithdrawFraudRule[],
+    private readonly structuredLogger: StructuredLogger,
   ) {}
 
   async evaluateTransfer(
@@ -58,11 +58,14 @@ export class FraudService {
       try {
         await rule.releaseReservation(input);
       } catch (error) {
-        this.logger.warn(
-          `Transfer reservation release failed for rule=${rule.name} userId=${input.userId} referenceId=${input.referenceId} error=${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+        this.structuredLogger.warn(FraudService.name, 'Transfer reservation release failed', {
+          eventType: 'FRAUD',
+          action: 'RELEASE_TRANSFER_RESERVATION',
+          rule: rule.name,
+          userId: input.userId,
+          referenceId: input.referenceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
@@ -84,11 +87,14 @@ export class FraudService {
       try {
         await rule.releaseReservation(input);
       } catch (error) {
-        this.logger.warn(
-          `Withdraw reservation release failed for rule=${rule.name} userId=${input.userId} referenceId=${input.referenceId} error=${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+        this.structuredLogger.warn(FraudService.name, 'Withdraw reservation release failed', {
+          eventType: 'FRAUD',
+          action: 'RELEASE_WITHDRAW_RESERVATION',
+          rule: rule.name,
+          userId: input.userId,
+          referenceId: input.referenceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }

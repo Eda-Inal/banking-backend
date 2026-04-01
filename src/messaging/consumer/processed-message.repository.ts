@@ -1,19 +1,20 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { CONFIG_KEYS } from '../../config/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TransientConsumerError } from './consumer.errors';
+import { StructuredLogger } from '../../logger/structured-logger.service';
 
 @Injectable()
 export class ProcessedMessageRepository {
-  private readonly logger = new Logger(ProcessedMessageRepository.name);
   private readonly consumerName = 'banking-backend';
   private readonly claimTtlMs: number;
 
   constructor(
     private readonly prisma: PrismaService,
     config: ConfigService,
+    private readonly structuredLogger: StructuredLogger,
   ) {
     this.claimTtlMs = this.parsePositiveInt(
       config.get<string>(CONFIG_KEYS.RABBITMQ_CONSUMER_CLAIM_TTL_MS),
@@ -109,11 +110,14 @@ export class ProcessedMessageRepository {
           AND "message_id" = ${messageId}
       `;
     } catch (error) {
-      this.logger.error(
-        `Consumer failed to mark FAILED messageId=${messageId} error=${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.structuredLogger.error(ProcessedMessageRepository.name, 'Failed to mark processed message as FAILED', {
+        details: {
+          eventType: 'MESSAGING',
+          action: 'MARK_FAILED',
+          messageId,
+        },
+        error: error instanceof Error ? error : { message: String(error) },
+      });
     }
   }
 

@@ -1,8 +1,9 @@
-import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from '@nestjs/common';
+import { StructuredLogger } from '../../logger/structured-logger.service';
 
 @Catch()
 export class GlobalExceptionFilter implements ExceptionFilter {
-  private readonly logger = new Logger(GlobalExceptionFilter.name);
+  constructor(private readonly structuredLogger: StructuredLogger) {}
 
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
@@ -31,11 +32,21 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       }
     }
 
-    const traceId = request.traceId ?? 'no-trace-id';
-    this.logger.error(
-      `[${traceId}] ${request.method} ${request.url} -> ${status} - ${error}`,
-      exception instanceof Error ? exception.stack : undefined,
-    );
+    this.structuredLogger.error(GlobalExceptionFilter.name, 'HTTP request failed', {
+      details: {
+        eventType: 'HTTP',
+        action: 'REQUEST_FAILED',
+        method: request.method,
+        path: request.url,
+        statusCode: status,
+        traceId: request.traceId,
+      },
+      error: exception instanceof Error
+        ? exception
+        : {
+            message: error,
+          },
+    });
 
     response.status(status).json({
       success: false,

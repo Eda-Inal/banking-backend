@@ -1,21 +1,23 @@
 import {
   Injectable,
-  Logger,
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { connect, type Channel, type ChannelModel, type ConfirmChannel } from 'amqplib';
 import { CONFIG_KEYS } from '../config/config';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 @Injectable()
 export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(RabbitMqConnection.name);
   private connection: ChannelModel | null = null;
   private channel: Channel | null = null;
   private publisherChannel: ConfirmChannel | null = null;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly structuredLogger: StructuredLogger,
+  ) {}
 
   async onModuleInit(): Promise<void> {
     const url = this.config.get<string>(CONFIG_KEYS.RABBITMQ_URL);
@@ -30,14 +32,23 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
     await this.setupTopology(this.channel);
 
     connection.on('error', (err) => {
-      this.logger.error(`RabbitMQ connection error: ${err.message}`);
+      this.structuredLogger.error(RabbitMqConnection.name, 'RabbitMQ connection error', {
+        details: { eventType: 'MESSAGING', action: 'RABBITMQ_CONNECTION_ERROR' },
+        error: err,
+      });
     });
 
     connection.on('close', () => {
-      this.logger.warn('RabbitMQ connection closed');
+      this.structuredLogger.warn(RabbitMqConnection.name, 'RabbitMQ connection closed', {
+        eventType: 'MESSAGING',
+        action: 'RABBITMQ_CONNECTION_CLOSE',
+      });
     });
 
-    this.logger.log('RabbitMQ connected');
+    this.structuredLogger.info(RabbitMqConnection.name, 'RabbitMQ connected', {
+      eventType: 'MESSAGING',
+      action: 'RABBITMQ_CONNECTED',
+    });
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -106,8 +117,13 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
     await channel.bindQueue(queue, exchange, '#');
     await channel.bindQueue(dlq, dlx, 'dead.letter');
 
-    this.logger.log(
-      `RabbitMQ topology ready exchange=${exchange} queue=${queue} dlx=${dlx} dlq=${dlq}`,
-    );
+    this.structuredLogger.info(RabbitMqConnection.name, 'RabbitMQ topology ready', {
+      eventType: 'MESSAGING',
+      action: 'RABBITMQ_TOPOLOGY_READY',
+      exchange,
+      queue,
+      dlx,
+      dlq,
+    });
   }
 }

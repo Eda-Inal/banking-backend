@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -6,6 +6,7 @@ import { RabbitMqPublisher } from '../messaging/rabbitmq.publisher';
 import { EventStatus } from '../common/enums';
 import { BANKING_EVENT_SCHEMA_VERSION } from '../common/banking-event-schema.version';
 import { CONFIG_KEYS } from '../config/config';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 type OutboxPublishMessage = {
   eventId: string;
@@ -37,7 +38,6 @@ type OutboxMetrics = {
 
 @Injectable()
 export class OutboxService {
-  private readonly logger = new Logger(OutboxService.name);
   private readonly exchange: string;
   private readonly batchSize: number;
   private readonly maxRetries: number;
@@ -55,6 +55,7 @@ export class OutboxService {
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly publisher: RabbitMqPublisher,
+    private readonly structuredLogger: StructuredLogger,
   ) {
     this.exchange =
       this.config.get<string>(CONFIG_KEYS.RABBITMQ_EVENTS_EXCHANGE) ??
@@ -141,21 +142,32 @@ export class OutboxService {
         });
 
         if (finalized.count !== 1) {
-          this.logger.warn(
-            `Outbox finalize PROCESSED skipped (row not PUBLISHING?) eventId=${evt.id}`,
-          );
+          this.structuredLogger.warn(OutboxService.name, 'Outbox finalize PROCESSED skipped', {
+            eventType: 'OUTBOX',
+            action: 'FINALIZE_PROCESSED_SKIPPED',
+            eventId: evt.id,
+          });
         } else {
           this.metrics.processed += 1;
-          this.logger.log(`Outbox published event ${evt.id} (${evt.type})`);
+          this.structuredLogger.info(OutboxService.name, 'Outbox published event', {
+            eventType: 'OUTBOX',
+            action: 'PUBLISH_SUCCESS',
+            eventId: evt.id,
+            eventName: evt.type,
+          });
         }
       } catch (error) {
         if (published) {
           // critical: message already published. Never downgrade to FAILED here, or we risk duplicate publish retries.
-          this.logger.error(
-            `Outbox published-but-finalize-failed eventId=${evt.id} claimedAt=${evt.claimedAt?.toISOString() ?? 'null'} error=${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
+          this.structuredLogger.error(OutboxService.name, 'Outbox published but finalize failed', {
+            details: {
+              eventType: 'OUTBOX',
+              action: 'PUBLISH_FINALIZE_ERROR',
+              eventId: evt.id,
+              claimedAt: evt.claimedAt?.toISOString() ?? null,
+            },
+            error: error instanceof Error ? error : { message: String(error) },
+          });
           continue;
         }
 
@@ -185,13 +197,22 @@ export class OutboxService {
         });
 
         if (updated.count !== 1) {
-          this.logger.warn(
-            `Outbox finalize FAILED skipped (row not PUBLISHING?) eventId=${evt.id}`,
-          );
+          this.structuredLogger.warn(OutboxService.name, 'Outbox finalize FAILED skipped', {
+            eventType: 'OUTBOX',
+            action: 'FINALIZE_FAILED_SKIPPED',
+            eventId: evt.id,
+          });
         } else {
-          this.logger.warn(
-            `Outbox failed event ${evt.id} (${evt.type}) retry=${nextRetryCount}/${this.maxRetries} nextRetryAt=${nextRetryAt?.toISOString() ?? 'none'} error=${error instanceof Error ? error.message : String(error)}`,
-          );
+          this.structuredLogger.warn(OutboxService.name, 'Outbox failed event', {
+            eventType: 'OUTBOX',
+            action: 'PUBLISH_FAILED',
+            eventId: evt.id,
+            eventName: evt.type,
+            retryCount: nextRetryCount,
+            maxRetries: this.maxRetries,
+            nextRetryAt: nextRetryAt?.toISOString() ?? null,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       }
     }

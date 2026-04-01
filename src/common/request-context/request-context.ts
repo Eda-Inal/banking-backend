@@ -11,4 +11,11 @@ export const RequestContext = {
   get(): RequestContextStore {
     return als.getStore() ?? {};
   },
+
+  merge(patch: Partial<RequestContextStore>): void {
+    const store = als.getStore();
+    if (store) {
+      Object.assign(store, patch);
+    }
+  },
 };

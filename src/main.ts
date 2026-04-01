@@ -4,23 +4,24 @@ import { ConfigService } from '@nestjs/config';
 import { CONFIG_KEYS } from './config/config';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { SuccessResponseInterceptor } from './common/interceptors/success-response.interceptor';
-import { ValidationPipe, type LogLevel } from '@nestjs/common';
+import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
+import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
+import { StructuredLogger } from './logger/structured-logger.service';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    bufferLogs: true,
+  });
+  const logger = app.get(WINSTON_MODULE_NEST_PROVIDER);
+  app.useLogger(logger);
+  const structuredLogger = app.get(StructuredLogger);
+
   const config = app.get(ConfigService);
   const port = Number(config.get(CONFIG_KEYS.PORT)) || 3000;
 
-  const nodeEnv = config.get(CONFIG_KEYS.NODE_ENV) ?? process.env.NODE_ENV ?? 'development';
-  const isDev = nodeEnv === 'development';
-  const loggerLevels: LogLevel[] = isDev
-    ? ['log', 'error', 'warn', 'debug']
-    : ['log', 'error', 'warn'];
-  app.useLogger(loggerLevels);
-
-  app.useGlobalFilters(new GlobalExceptionFilter());
-  app.useGlobalInterceptors(new SuccessResponseInterceptor());
+  app.useGlobalFilters(new GlobalExceptionFilter(structuredLogger));
+  app.useGlobalInterceptors(new SuccessResponseInterceptor(structuredLogger));
   app.useGlobalPipes(new ValidationPipe({
     whitelist: true,
     transform: true,

@@ -1,6 +1,5 @@
 import {
   Injectable,
-  Logger,
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
@@ -17,6 +16,7 @@ import {
 } from './consumer/rabbitmq-retry.helper';
 import { ProcessedMessageRepository } from './consumer/processed-message.repository';
 import { RabbitMqTransactionEventDispatcher } from './consumer/rabbitmq-transaction-event.dispatcher';
+import { StructuredLogger } from '../logger/structured-logger.service';
 
 type ConsumerMetrics = {
   consumed: number;
@@ -28,7 +28,6 @@ type ConsumerMetrics = {
 
 @Injectable()
 export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(RabbitMqConsumer.name);
   private readonly prefetchCount: number;
   private readonly maxRetries: number;
   private consumerTag: string | null = null;
@@ -46,6 +45,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly rabbit: RabbitMqConnection,
     private readonly processedMessages: ProcessedMessageRepository,
     private readonly transactionEventDispatcher: RabbitMqTransactionEventDispatcher,
+    private readonly structuredLogger: StructuredLogger,
   ) {
     this.prefetchCount = this.parsePositiveInt(
       this.config.get<string>(CONFIG_KEYS.RABBITMQ_CONSUMER_PREFETCH),
@@ -77,7 +77,10 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
     try {
       const channel = this.rabbit.getChannel();
       await channel.cancel(this.consumerTag);
-      this.logger.log('RabbitMQ consumer stopped');
+      this.structuredLogger.info(RabbitMqConsumer.name, 'RabbitMQ consumer stopped', {
+        eventType: 'MESSAGING',
+        action: 'CONSUMER_STOP',
+      });
     } finally {
       this.consumerTag = null;
     }
@@ -102,7 +105,11 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
       const claimed = await this.processedMessages.claim(messageId, eventType);
       if (!claimed) {
         this.metrics.duplicates += 1;
-        this.logger.warn(`Consumer duplicate-skipped messageId=${messageId}`);
+        this.structuredLogger.warn(RabbitMqConsumer.name, 'Consumer duplicate skipped', {
+          eventType: 'MESSAGING',
+          action: 'CONSUME_DUPLICATE',
+          messageId,
+        });
         channel.ack(msg);
         return;
       }
@@ -113,7 +120,12 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
       this.metrics.consumed += 1;
       this.metrics.lastMessageAt = new Date().toISOString();
       channel.ack(msg);
-      this.logger.log(`Consumer ack eventType=${eventType} messageId=${messageId}`);
+      this.structuredLogger.info(RabbitMqConsumer.name, 'Consumer ack', {
+        eventType: 'MESSAGING',
+        action: 'CONSUME_ACK',
+        messageType: eventType,
+        messageId,
+      });
     } catch (error) {
       if (claimedMessageId) {
         await this.processedMessages.markFailed(
@@ -131,22 +143,29 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
         if (republished) {
           this.metrics.requeued += 1;
           channel.ack(msg);
-          this.logger.warn(
-            `Consumer retry scheduled messageId=${messageId} attempt=${nextAttempts}/${this.maxRetries} error=${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
+          this.structuredLogger.warn(RabbitMqConsumer.name, 'Consumer retry scheduled', {
+            eventType: 'MESSAGING',
+            action: 'CONSUME_RETRY',
+            messageId,
+            attempt: nextAttempts,
+            maxRetries: this.maxRetries,
+            error: error instanceof Error ? error.message : String(error),
+          });
           return;
         }
       }
 
       const requeue = false;
       this.metrics.nacked += 1;
-      this.logger.warn(
-        `Consumer nack messageId=${messageId} requeue=${requeue} attempts=${nextAttempts}/${this.maxRetries} error=${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.structuredLogger.warn(RabbitMqConsumer.name, 'Consumer nack', {
+        eventType: 'MESSAGING',
+        action: 'CONSUME_NACK',
+        messageId,
+        requeue,
+        attempt: nextAttempts,
+        maxRetries: this.maxRetries,
+        error: error instanceof Error ? error.message : String(error),
+      });
       channel.nack(msg, false, requeue);
     }
   }
@@ -175,15 +194,18 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
         clearInterval(this.bootstrapTimer);
         this.bootstrapTimer = null;
       }
-      this.logger.log(
-        `RabbitMQ consumer started queue=${queue} prefetch=${this.prefetchCount}`,
-      );
+      this.structuredLogger.info(RabbitMqConsumer.name, 'RabbitMQ consumer started', {
+        eventType: 'MESSAGING',
+        action: 'CONSUMER_START',
+        queue,
+        prefetch: this.prefetchCount,
+      });
     } catch (error) {
-      this.logger.warn(
-        `RabbitMQ consumer bootstrap retry: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.structuredLogger.warn(RabbitMqConsumer.name, 'RabbitMQ consumer bootstrap retry', {
+        eventType: 'MESSAGING',
+        action: 'CONSUMER_BOOTSTRAP_RETRY',
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
