@@ -6,6 +6,7 @@ import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { TraceIdMiddleware } from './common/middleware/trace-id.middleware';
+import { GlobalRateLimitMiddleware } from './common/middleware/global-rate-limit.middleware';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { AccountsModule } from './accounts/accounts.module';
@@ -44,7 +45,10 @@ import { RequestContextUserInterceptor } from './common/interceptors/request-con
 })
 export class AppModule {
   configure(consumer: MiddlewareConsumer) {
-    consumer.apply(TraceIdMiddleware).forRoutes('*');
+    consumer
+      .apply(TraceIdMiddleware, GlobalRateLimitMiddleware)
+      .exclude('/health', '/metrics')
+      .forRoutes('*');
   }
 }
 
