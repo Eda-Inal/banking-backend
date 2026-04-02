@@ -6,6 +6,7 @@ import { RedisService } from '../redis/redis.service';
 import { CONFIG_KEYS } from '../config/config';
 import { TRANSFER_FRAUD_RULES, WITHDRAW_FRAUD_RULES } from './fraud.constants';
 import { PrismaService } from '../prisma/prisma.service';
+import { StructuredLogger } from '../logger/structured-logger.service';
 import { SameAccountTransferRule } from './rules/transfer/same-account-transfer.rule';
 import { TransferAmountExceededRule } from './rules/transfer/transfer-amount-exceeded.rule';
 import { TooManyTransfersInMinuteRule } from './rules/transfer/too-many-transfers-in-minute.rule';
@@ -18,11 +19,12 @@ import { DailyWithdrawLimitExceededRule } from './rules/withdraw/daily-withdraw-
   providers: [
     {
       provide: TRANSFER_FRAUD_RULES,
-      inject: [ConfigService, RedisService, PrismaService],
+      inject: [ConfigService, RedisService, PrismaService, StructuredLogger],
       useFactory: (
         config: ConfigService,
         redisService: RedisService,
         prismaService: PrismaService,
+        structuredLogger: StructuredLogger,
       ) => {
         const transferThreshold = Number(
           config.get<string>(CONFIG_KEYS.FRAUD_TRANSFER_MAX_AMOUNT) ?? '100000',
@@ -37,22 +39,28 @@ import { DailyWithdrawLimitExceededRule } from './rules/withdraw/daily-withdraw-
         return [
           new SameAccountTransferRule(),
           new TransferAmountExceededRule(transferThreshold),
-          new TooManyTransfersInMinuteRule(redisService, transferPerMinuteLimit),
+          new TooManyTransfersInMinuteRule(
+            redisService,
+            transferPerMinuteLimit,
+            structuredLogger,
+          ),
           new DailyTransferLimitExceededRule(
             redisService,
             dailyTransferLimit,
             prismaService,
+            structuredLogger,
           ),
         ];
       },
     },
     {
       provide: WITHDRAW_FRAUD_RULES,
-      inject: [ConfigService, RedisService, PrismaService],
+      inject: [ConfigService, RedisService, PrismaService, StructuredLogger],
       useFactory: (
         config: ConfigService,
         redisService: RedisService,
         prismaService: PrismaService,
+        structuredLogger: StructuredLogger,
       ) => {
         const withdrawThreshold = Number(
           config.get<string>(CONFIG_KEYS.FRAUD_WITHDRAW_MAX_AMOUNT) ?? '50000',
@@ -67,6 +75,7 @@ import { DailyWithdrawLimitExceededRule } from './rules/withdraw/daily-withdraw-
             redisService,
             dailyWithdrawLimit,
             prismaService,
+            structuredLogger,
           ),
         ];
       },

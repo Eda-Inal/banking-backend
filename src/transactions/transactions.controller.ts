@@ -78,6 +78,29 @@ return 0
     }
   }
 
+  private async tryDeleteIdempotencyKey(
+    key: string | undefined,
+    err: unknown,
+    operation: IdempotencyOperation,
+  ): Promise<void> {
+    if (!key || err instanceof ConflictException) return;
+    try {
+      await this.redis.getClient().del(key);
+    } catch (delErr) {
+      this.structuredLogger.warn(
+        TransactionsController.name,
+        'Failed to delete idempotency in-flight key on error path',
+        {
+          eventType: 'TRANSACTION',
+          action: 'IDEMPOTENCY_INFLIGHT_DEL_FAILED',
+          operation,
+          idempotencyKey: key,
+          error: delErr instanceof Error ? { message: delErr.message, name: delErr.name } : { message: String(delErr) },
+        },
+      );
+    }
+  }
+
   private async releaseTransferUserLock(req: IdempotencyRequest): Promise<void> {
     const lockKey = req.transferUserLockKey;
     const lockToken = req.transferUserLockToken;
@@ -89,6 +112,18 @@ return 0
         1,
         lockKey,
         lockToken,
+      );
+    } catch (err) {
+
+      this.structuredLogger.warn(
+        TransactionsController.name,
+        'Failed to release transfer user lock in Redis',
+        {
+          eventType: 'TRANSACTION',
+          action: 'TRANSFER_USER_LOCK_RELEASE_FAILED',
+          lockKey,
+          error: err instanceof Error ? { message: err.message, name: err.name } : { message: String(err) },
+        },
       );
     } finally {
       req.transferUserLockKey = undefined;
@@ -112,11 +147,7 @@ return 0
       await this.markIdempotencyKeyDone(key, 'deposit');
       return result;
     } catch (err) {
-      if (key) {
-        if (!(err instanceof ConflictException)) {
-          await this.redis.getClient().del(key);
-        }
-      }
+      await this.tryDeleteIdempotencyKey(key, err, 'deposit');
       throw err;
     }
   }
@@ -137,11 +168,7 @@ return 0
       await this.markIdempotencyKeyDone(key, 'withdraw');
       return result;
     } catch (err) {
-      if (key) {
-        if (!(err instanceof ConflictException)) {
-          await this.redis.getClient().del(key);
-        }
-      }
+      await this.tryDeleteIdempotencyKey(key, err, 'withdraw');
       throw err;
     }
   }
@@ -162,11 +189,7 @@ return 0
       await this.markIdempotencyKeyDone(key, 'transfer');
       return result;
     } catch (err) {
-      if (key) {
-        if (!(err instanceof ConflictException)) {
-          await this.redis.getClient().del(key);
-        }
-      }
+      await this.tryDeleteIdempotencyKey(key, err, 'transfer');
       throw err;
     } finally {
       await this.releaseTransferUserLock(req);

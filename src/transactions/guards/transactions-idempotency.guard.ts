@@ -60,20 +60,39 @@ export class TransactionsIdempotencyGuard implements CanActivate {
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest<
+      IdempotencyRequest & { user?: any }
+    >();
+
+    const userId: string | undefined = request.user?.userId;
+    if (!userId) {
+      return true;
+    }
+
+    const referenceIdForLog = this.extractReferenceId(request);
+
+    if (!this.redis.isReady()) {
+      this.structuredLogger.warn(
+        TransactionsIdempotencyGuard.name,
+        'Redis unavailable, skipping idempotency guard',
+        {
+          eventType: 'INFRA',
+          action: 'REDIS_IDEMPOTENCY_SKIP',
+          userId,
+          component: TransactionsIdempotencyGuard.name,
+          fallback: 'skip_idempotency_guard',
+          referenceId: referenceIdForLog,
+        },
+      );
+      return true;
+    }
+
     try {
-      const request = context
-        .switchToHttp()
-        .getRequest<IdempotencyRequest & { user?: any }>();
-
-      const userId: string | undefined = request.user?.userId;
-      if (!userId) {
-        return true;
-      }
-
       const referenceId = this.extractReferenceId(request);
       if (!referenceId) {
         throw new BadRequestException('Missing referenceId');
       }
+
       const operation = this.extractOperation(request);
       const inFlightTtlSeconds = Number(
         this.config.get<string>(
@@ -91,7 +110,7 @@ export class TransactionsIdempotencyGuard implements CanActivate {
         inFlightTtlSeconds,
         'NX',
       );
-      
+
       if (ok === 'OK') {
         if (operation === 'transfer') {
           const transferLockKey = `${TRANSFER_USER_LOCK_PREFIX}${userId}:TRANSFER`;
@@ -105,14 +124,20 @@ export class TransactionsIdempotencyGuard implements CanActivate {
           );
           if (lockOk !== 'OK') {
             await client.del(key);
-            this.structuredLogger.warn(TransactionsIdempotencyGuard.name, 'Transfer lock conflict', {
-              eventType: 'TRANSACTION',
-              action: 'TRANSFER_LOCK_CONFLICT',
-              userId,
-              operation: 'transfer',
-              referenceId,
-            });
-            throw new ConflictException('Another transfer is already in progress');
+            this.structuredLogger.warn(
+              TransactionsIdempotencyGuard.name,
+              'Transfer lock conflict',
+              {
+                eventType: 'TRANSACTION',
+                action: 'TRANSFER_LOCK_CONFLICT',
+                userId,
+                operation: 'transfer',
+                referenceId,
+              },
+            );
+            throw new ConflictException(
+              'Another transfer is already in progress',
+            );
           }
           request.transferUserLockKey = transferLockKey;
           request.transferUserLockToken = transferLockToken;
@@ -123,25 +148,29 @@ export class TransactionsIdempotencyGuard implements CanActivate {
         request.idempotencyOperation = operation;
         return true;
       }
-      
+
       const state = await client.get(key);
-      
+
       if (state === 'done') {
         request.idempotencyKey = key;
         request.idempotencyReferenceId = referenceId;
         request.idempotencyOperation = operation;
         return true;
       }
-      
+
       if (state === 'in-flight') {
-        this.structuredLogger.warn(TransactionsIdempotencyGuard.name, 'Idempotency conflict in-flight', {
-          eventType: 'TRANSACTION',
-          action: 'IDEMPOTENCY_CONFLICT',
-          userId,
-          referenceId,
-          operation,
-          state: 'in-flight',
-        });
+        this.structuredLogger.warn(
+          TransactionsIdempotencyGuard.name,
+          'Idempotency conflict in-flight',
+          {
+            eventType: 'TRANSACTION',
+            action: 'IDEMPOTENCY_CONFLICT',
+            userId,
+            referenceId,
+            operation,
+            state: 'in-flight',
+          },
+        );
         throw new ConflictException('Duplicate request in progress');
       }
       throw new ConflictException('Duplicate request');
@@ -149,10 +178,19 @@ export class TransactionsIdempotencyGuard implements CanActivate {
       if (err instanceof HttpException) {
         throw err;
       }
-      throw new HttpException(
-        'Service temporarily unavailable. Try again later.',
-        HttpStatus.SERVICE_UNAVAILABLE,
+      this.structuredLogger.warn(
+        TransactionsIdempotencyGuard.name,
+        'Idempotency guard redis operation failed, fail-open',
+        {
+          eventType: 'INFRA',
+          action: 'REDIS_IDEMPOTENCY_OPERATION_FAILED_FAIL_OPEN',
+          userId,
+          component: TransactionsIdempotencyGuard.name,
+          fallback: 'skip_idempotency_guard',
+          referenceId: referenceIdForLog,
+        },
       );
+      return true;
     }
   }
 }

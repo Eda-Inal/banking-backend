@@ -60,13 +60,31 @@ return count
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    try {
-      const request = context.switchToHttp().getRequest<Request & { user?: any }>();
-      const userId: string | undefined = request.user?.userId;
-      if (!userId) {
-        return true;
-      }
+    const request = context.switchToHttp().getRequest<Request & { user?: any }>();
+    const userId: string | undefined = request.user?.userId;
+    const referenceIdForLog =
+      typeof (request as any).body?.referenceId === 'string'
+        ? (request as any).body.referenceId.trim()
+        : typeof request.headers['x-reference-id'] === 'string'
+          ? request.headers['x-reference-id'].trim()
+          : undefined;
+    if (!userId) {
+      return true;
+    }
 
+    if (!this.redis.isReady()) {
+      this.structuredLogger.warn(TransferRateLimitGuard.name, 'Redis unavailable, skipping transfer rate limit', {
+        eventType: 'INFRA',
+        action: 'REDIS_RATE_LIMIT_SKIP',
+        userId,
+        component: TransferRateLimitGuard.name,
+        fallback: 'skip_rate_limit',
+        referenceId: referenceIdForLog,
+      });
+      return true;
+    }
+
+    try {
       const minuteWindow = Math.floor(Date.now() / 60_000);
       const key = `${KEY_PREFIX}${userId}:${minuteWindow}`;
       await this.checkLimit(key, DEFAULT_LIMIT_PER_MINUTE, userId);
@@ -75,10 +93,25 @@ return count
       if (err instanceof HttpException) {
         throw err;
       }
-      throw new HttpException(
-        'Service temporarily unavailable. Try again later.',
-        HttpStatus.SERVICE_UNAVAILABLE,
+
+      this.structuredLogger.warn(
+        TransferRateLimitGuard.name,
+        'Transfer rate limit redis operation failed, fail-open',
+        {
+          eventType: 'INFRA',
+          action: 'REDIS_RATE_LIMIT_OPERATION_FAILED_FAIL_OPEN',
+          userId,
+          component: TransferRateLimitGuard.name,
+          fallback: 'fail_open_skip_rate_limit',
+          referenceId: referenceIdForLog,
+          error:
+            err instanceof Error
+              ? { message: err.message, name: err.name }
+              : { message: String(err) },
+        },
       );
+
+      return true;
     }
   }
 }

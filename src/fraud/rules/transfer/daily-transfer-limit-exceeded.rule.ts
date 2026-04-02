@@ -5,6 +5,7 @@ import { TransferFraudCheckInput } from '../../types/transfer-fraud-check-input.
 import { FraudDecisionResult } from '../../types/fraud-decision-result.type';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { TransactionStatus, TransactionType } from '../../../common/enums';
+import { StructuredLogger } from '../../../logger/structured-logger.service';
 
 export class DailyTransferLimitExceededRule implements TransferFraudRule {
   name = 'DAILY_TRANSFER_LIMIT_EXCEEDED';
@@ -79,6 +80,7 @@ return {1, nextTotal}
     private readonly redis: RedisService,
     private readonly dailyLimit: number,
     private readonly prisma: PrismaService,
+    private readonly structuredLogger: StructuredLogger,
   ) {}
 
   async evaluate(
@@ -112,7 +114,21 @@ return {1, nextTotal}
         };
       }
       return null;
-    } catch {
+    } catch (err) {
+      this.structuredLogger.warn(
+        DailyTransferLimitExceededRule.name,
+        'Redis unavailable, using fallback',
+        {
+          eventType: 'INFRA',
+          action: 'REDIS_FALLBACK',
+          component: DailyTransferLimitExceededRule.name,
+          fallback: 'db_query',
+          userId: input.userId,
+          referenceId: input.referenceId,
+          error:
+            err instanceof Error ? { message: err.message, name: err.name } : { message: String(err) },
+        },
+      );
       try {
         return await this.evaluateFromDb(input);
       } catch {

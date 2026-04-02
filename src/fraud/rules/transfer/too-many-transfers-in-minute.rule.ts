@@ -2,6 +2,7 @@ import { TransferFraudRule } from '../fraud-rule.interface';
 import { TransferFraudCheckInput } from '../../types/transfer-fraud-check-input.type';
 import { FraudDecisionResult } from '../../types/fraud-decision-result.type';
 import { RedisService } from '../../../redis/redis.service';
+import { StructuredLogger } from '../../../logger/structured-logger.service';
 import type { Prisma } from '../../../generated/prisma/client';
 
 export class TooManyTransfersInMinuteRule implements TransferFraudRule {
@@ -19,12 +20,30 @@ return count
   constructor(
     private readonly redisService: RedisService,
     private readonly limitPerMinute: number,
+    private readonly structuredLogger: StructuredLogger,
   ) {}
 
   async evaluate(
     input: TransferFraudCheckInput,
     _tx?: Prisma.TransactionClient,
   ): Promise<FraudDecisionResult | null> {
+
+    if (!this.redisService.isReady()) {
+      this.structuredLogger.warn(
+        TooManyTransfersInMinuteRule.name,
+        'Redis unavailable, skipping minute transfer count rule',
+        {
+          eventType: 'INFRA',
+          action: 'REDIS_MINUTE_TRANSFER_RULE_SKIP',
+          userId: input.userId,
+          component: TooManyTransfersInMinuteRule.name,
+          fallback: 'skip_minute_rule',
+          referenceId: input.referenceId,
+        },
+      );
+      return null;
+    }
+
     const client = this.redisService.getClient();
     const { minuteBucket, ttlSeconds } = this.getUtcMinuteMeta();
     const key = `fraud:transfer:minute:${input.userId}:${minuteBucket}`;
@@ -45,7 +64,19 @@ return count
 
       return null;
     } catch {
-      return { decision: 'REJECT', reason: this.name };
+      this.structuredLogger.warn(
+        TooManyTransfersInMinuteRule.name,
+        'Redis operation failed, skipping minute transfer count rule',
+        {
+          eventType: 'INFRA',
+          action: 'REDIS_MINUTE_TRANSFER_RULE_OPERATION_FAILED_FAIL_OPEN',
+          userId: input.userId,
+          component: TooManyTransfersInMinuteRule.name,
+          fallback: 'skip_minute_rule',
+          referenceId: input.referenceId,
+        },
+      );
+      return null;
     }
   }
 

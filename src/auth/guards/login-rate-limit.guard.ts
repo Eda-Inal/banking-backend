@@ -10,6 +10,8 @@ import { Request } from 'express';
 import { CONFIG_KEYS } from '../../config/config';
 import { RedisService } from '../../redis/redis.service';
 import { StructuredLogger } from '../../logger/structured-logger.service';
+import { PrismaService } from '../../prisma/prisma.service';
+import { AccountLockedException } from '../exceptions/account-locked.exception';
 
 const KEY_PREFIX_IP = 'login:ip:';
 const KEY_PREFIX_EMAIL = 'login:email:';
@@ -43,7 +45,8 @@ return count
     private readonly redis: RedisService,
     private readonly config: ConfigService,
     private readonly structuredLogger: StructuredLogger,
-  ) { }
+    private readonly prisma: PrismaService,
+  ) {}
 
   private getClientIp(req: Request): string {
     return req.ip ?? req.socket?.remoteAddress ?? 'unknown';
@@ -92,13 +95,15 @@ return count
         : '';
 
     if (!this.redis.isReady()) {
-      this.structuredLogger.warn(LoginRateLimitGuard.name, 'Redis unavailable, skipping login rate limit', {
+      this.structuredLogger.warn(LoginRateLimitGuard.name, 'Redis unavailable, falling back to DB account lock check', {
         eventType: 'INFRA',
-        action: 'LOGIN_RATE_LIMIT_REDIS_UNAVAILABLE_FAIL_OPEN',
+        action: 'LOGIN_RATE_LIMIT_REDIS_UNAVAILABLE_DB_FALLBACK',
+        component: LoginRateLimitGuard.name,
+        fallback: 'db_account_lock_check',
         ip,
         emailMasked: email ? maskEmailForLog(email) : null,
       });
-      return true;
+      return this.checkDbAccountLock(email);
     }
 
     const client = this.redis.getClient();
@@ -124,14 +129,49 @@ return count
         throw err;
       }
 
-      this.structuredLogger.warn(LoginRateLimitGuard.name, 'Login rate limit redis operation failed, fail-open', {
+      this.structuredLogger.warn(LoginRateLimitGuard.name, 'Redis operation failed, falling back to DB account lock check', {
         eventType: 'INFRA',
-        action: 'LOGIN_RATE_LIMIT_REDIS_OPERATION_FAILED_FAIL_OPEN',
+        action: 'LOGIN_RATE_LIMIT_REDIS_OPERATION_FAILED_DB_FALLBACK',
+        component: LoginRateLimitGuard.name,
+        fallback: 'db_account_lock_check',
         ip,
         emailMasked: email ? maskEmailForLog(email) : null,
         error: err instanceof Error ? { message: err.message, name: err.name } : { message: String(err) },
       });
-      return true;
+      return this.checkDbAccountLock(email);
     }
+  }
+
+  private async checkDbAccountLock(email: string): Promise<boolean> {
+    if (!email) return true;
+
+    try {
+      const customer = await this.prisma.customer.findUnique({
+        where: { email },
+        select: { lockUntil: true },
+      });
+
+      if (customer?.lockUntil && customer.lockUntil > new Date()) {
+        throw new AccountLockedException(
+          'Account temporarily locked due to too many failed attempts. Try again later.',
+        );
+      }
+    } catch (err) {
+      if (err instanceof AccountLockedException) throw err;
+      this.structuredLogger.warn(
+        LoginRateLimitGuard.name,
+        'DB account lock check failed, allowing request',
+        {
+          eventType: 'INFRA',
+          action: 'LOGIN_RATE_LIMIT_DB_FALLBACK_FAILED',
+          component: LoginRateLimitGuard.name,
+          fallback: 'db_account_lock_check',
+          emailMasked: maskEmailForLog(email),
+          error: err instanceof Error ? { message: err.message, name: err.name } : { message: String(err) },
+        },
+      );
+    }
+
+    return true;
   }
 }
