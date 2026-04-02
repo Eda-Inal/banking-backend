@@ -31,11 +31,19 @@ const maskEmailForLog = (email: string): string => {
 
 @Injectable()
 export class LoginRateLimitGuard implements CanActivate {
+  private static readonly INCR_WITH_EXPIRE_LUA = `
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+end
+return count
+`;
+
   constructor(
     private readonly redis: RedisService,
     private readonly config: ConfigService,
     private readonly structuredLogger: StructuredLogger,
-  ) {}
+  ) { }
 
   private getClientIp(req: Request): string {
     return req.ip ?? req.socket?.remoteAddress ?? 'unknown';
@@ -47,9 +55,15 @@ export class LoginRateLimitGuard implements CanActivate {
     limit: number,
     details: { ip: string; email?: string },
   ): Promise<void> {
-    const count = await client.incr(key);
-    if (count === 1) {
-      await client.expire(key, WINDOW_SECONDS);
+    const raw = await client.eval(
+      LoginRateLimitGuard.INCR_WITH_EXPIRE_LUA,
+      1,
+      key,
+      WINDOW_SECONDS.toString(),
+    );
+    const count = Number(raw);
+    if (!Number.isFinite(count) || count < 1) {
+      throw new Error(`Invalid login rate limit counter: ${String(raw)}`);
     }
     if (count > limit) {
       this.structuredLogger.warn(LoginRateLimitGuard.name, 'Login rate limit hit', {
@@ -68,22 +82,33 @@ export class LoginRateLimitGuard implements CanActivate {
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    try {
-      const request = context.switchToHttp().getRequest<Request>();
-      const ip = this.getClientIp(request);
-      const minuteWindow = Math.floor(Date.now() / 60_000);
-      const client = this.redis.getClient();
+    const request = context.switchToHttp().getRequest<Request>();
+    const ip = this.getClientIp(request);
+    const minuteWindow = Math.floor(Date.now() / 60_000);
 
+    const email =
+      typeof request.body?.email === 'string'
+        ? request.body.email.trim().toLowerCase()
+        : '';
+
+    if (!this.redis.isReady()) {
+      this.structuredLogger.warn(LoginRateLimitGuard.name, 'Redis unavailable, skipping login rate limit', {
+        eventType: 'INFRA',
+        action: 'LOGIN_RATE_LIMIT_REDIS_UNAVAILABLE_FAIL_OPEN',
+        ip,
+        emailMasked: email ? maskEmailForLog(email) : null,
+      });
+      return true;
+    }
+
+    const client = this.redis.getClient();
+    try {
       const ipLimit =
         Number(this.config.get(CONFIG_KEYS.LOGIN_RATE_LIMIT_IP_PER_MINUTE)) ||
         20;
       const ipKey = `${KEY_PREFIX_IP}${ip}:${minuteWindow}`;
       await this.checkLimit(client, ipKey, ipLimit, { ip });
 
-      const email =
-        typeof request.body?.email === 'string'
-          ? request.body.email.trim().toLowerCase()
-          : '';
       if (email) {
         const emailLimit =
           Number(
@@ -98,10 +123,15 @@ export class LoginRateLimitGuard implements CanActivate {
       if (err instanceof HttpException) {
         throw err;
       }
-      throw new HttpException(
-        'Service temporarily unavailable. Try again later.',
-        HttpStatus.SERVICE_UNAVAILABLE,
-      );
+
+      this.structuredLogger.warn(LoginRateLimitGuard.name, 'Login rate limit redis operation failed, fail-open', {
+        eventType: 'INFRA',
+        action: 'LOGIN_RATE_LIMIT_REDIS_OPERATION_FAILED_FAIL_OPEN',
+        ip,
+        emailMasked: email ? maskEmailForLog(email) : null,
+        error: err instanceof Error ? { message: err.message, name: err.name } : { message: String(err) },
+      });
+      return true;
     }
   }
 }

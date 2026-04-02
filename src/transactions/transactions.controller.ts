@@ -13,6 +13,9 @@ import {
   TransactionsIdempotencyGuard,
   type IdempotencyRequest,
 } from './guards/transactions-idempotency.guard';
+import { StructuredLogger } from '../logger/structured-logger.service';
+
+type IdempotencyOperation = 'deposit' | 'withdraw' | 'transfer';
 
 @Controller('transactions')
 @UseGuards(JwtGuard)
@@ -27,7 +30,53 @@ return 0
   constructor(
     private readonly transactionsService: TransactionsService,
     private readonly redis: RedisService,
+    private readonly structuredLogger: StructuredLogger,
   ) {}
+
+
+  private async markIdempotencyKeyDone(
+    key: string | undefined,
+    operation: IdempotencyOperation,
+  ): Promise<void> {
+    if (!key) return;
+    try {
+      await this.redis.getClient().set(key, 'done', 'EX', 60 * 5);
+    } catch (err) {
+      this.structuredLogger.warn(
+        TransactionsController.name,
+        'Failed to mark idempotency key as done in Redis',
+        {
+          eventType: 'TRANSACTION',
+          action: 'IDEMPOTENCY_DONE_REDIS_FAILED',
+          operation,
+          idempotencyKey: key,
+          error:
+            err instanceof Error
+              ? { message: err.message, name: err.name }
+              : { message: String(err) },
+        },
+      );
+
+      try {
+        await this.redis.getClient().del(key);
+      } catch (delErr) {
+        this.structuredLogger.warn(
+          TransactionsController.name,
+          'Failed to clear idempotency in-flight key after Redis done-set failure',
+          {
+            eventType: 'TRANSACTION',
+            action: 'IDEMPOTENCY_DONE_REDIS_FAILED_DEL_INFLIGHT_FAILED',
+            operation,
+            idempotencyKey: key,
+            error:
+              delErr instanceof Error
+                ? { message: delErr.message, name: delErr.name }
+                : { message: String(delErr) },
+          },
+        );
+      }
+    }
+  }
 
   private async releaseTransferUserLock(req: IdempotencyRequest): Promise<void> {
     const lockKey = req.transferUserLockKey;
@@ -60,9 +109,7 @@ return 0
         user.userId,
         createDepositRequestDto,
       );
-      if (key) {
-        await this.redis.getClient().set(key, 'done', 'EX', 60 * 5);
-      }
+      await this.markIdempotencyKeyDone(key, 'deposit');
       return result;
     } catch (err) {
       if (key) {
@@ -87,9 +134,7 @@ return 0
         user.userId,
         createWithdrawRequestDto,
       );
-      if (key) {
-        await this.redis.getClient().set(key, 'done', 'EX', 60 * 5);
-      }
+      await this.markIdempotencyKeyDone(key, 'withdraw');
       return result;
     } catch (err) {
       if (key) {
@@ -114,9 +159,7 @@ return 0
         user.userId,
         createTransferRequestDto,
       );
-      if (key) {
-        await this.redis.getClient().set(key, 'done', 'EX', 60 * 5);
-      }
+      await this.markIdempotencyKeyDone(key, 'transfer');
       return result;
     } catch (err) {
       if (key) {

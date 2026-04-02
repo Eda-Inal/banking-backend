@@ -15,6 +15,14 @@ const DEFAULT_LIMIT_PER_MINUTE = 10;
 
 @Injectable()
 export class TransferRateLimitGuard implements CanActivate {
+  private static readonly INCR_WITH_EXPIRE_LUA = `
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+end
+return count
+`;
+
   constructor(
     private readonly redis: RedisService,
     private readonly structuredLogger: StructuredLogger,
@@ -26,9 +34,15 @@ export class TransferRateLimitGuard implements CanActivate {
     userId: string,
   ): Promise<void> {
     const client = this.redis.getClient();
-    const count = await client.incr(key);
-    if (count === 1) {
-      await client.expire(key, WINDOW_SECONDS);
+    const raw = await client.eval(
+      TransferRateLimitGuard.INCR_WITH_EXPIRE_LUA,
+      1,
+      key,
+      WINDOW_SECONDS.toString(),
+    );
+    const count = Number(raw);
+    if (!Number.isFinite(count) || count < 1) {
+      throw new Error(`Invalid transfer rate limit counter: ${String(raw)}`);
     }
     if (count > limit) {
       this.structuredLogger.warn(TransferRateLimitGuard.name, 'Transfer rate limit hit', {

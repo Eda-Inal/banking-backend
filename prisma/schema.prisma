@@ -155,6 +155,7 @@ model Transaction {
   @@index([fromAccountId])
   @@index([toAccountId])
   @@index([actorCustomerId])
+  @@index([actorCustomerId, type, status, createdAt])
   @@unique([actorCustomerId, type, referenceId])
 }
 

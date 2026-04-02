@@ -3,6 +3,8 @@ import { RedisService } from '../../../redis/redis.service';
 import { WithdrawFraudRule } from '../fraud-rule.interface';
 import { WithdrawFraudCheckInput } from '../../types/withdraw-fraud-check-input.type';
 import { FraudDecisionResult } from '../../types/fraud-decision-result.type';
+import { PrismaService } from '../../../prisma/prisma.service';
+import { TransactionStatus, TransactionType } from '../../../common/enums';
 
 export class DailyWithdrawLimitExceededRule implements WithdrawFraudRule {
   name = 'DAILY_WITHDRAW_LIMIT_EXCEEDED';
@@ -76,6 +78,7 @@ return {1, nextTotal}
   constructor(
     private readonly redis: RedisService,
     private readonly dailyLimit: number,
+    private readonly prisma: PrismaService,
   ) {}
 
   async evaluate(
@@ -110,11 +113,40 @@ return {1, nextTotal}
       }
       return null;
     } catch {
-      return {
-        decision: 'REJECT',
-        reason: this.name,
-      };
+      try {
+        return await this.evaluateFromDb(input);
+      } catch {
+        return { decision: 'REJECT', reason: this.name };
+      }
     }
+  }
+
+  private async evaluateFromDb(
+    input: WithdrawFraudCheckInput,
+  ): Promise<FraudDecisionResult | null> {
+    const { startOfDayUtc, endOfDayUtc } = this.getUtcDayRange();
+
+    const agg = await this.prisma.transaction.aggregate({
+      where: {
+        actorCustomerId: input.userId,
+        type: TransactionType.WITHDRAW,
+        status: TransactionStatus.COMPLETED,
+        createdAt: {
+          gte: startOfDayUtc,
+          lt: endOfDayUtc,
+        },
+      },
+      _sum: { amount: true },
+    });
+
+    const usedToday = agg._sum.amount ?? new Prisma.Decimal(0);
+    const projectedTotal = usedToday.add(input.amount);
+
+    if (projectedTotal.gt(this.dailyLimit)) {
+      return { decision: 'REJECT', reason: this.name };
+    }
+
+    return null;
   }
 
   async releaseReservation(input: WithdrawFraudCheckInput): Promise<void> {
@@ -151,5 +183,32 @@ return {1, nextTotal}
       dayBucket: `${yyyy}${mm}${dd}`,
       ttlSeconds,
     };
+  }
+
+  private getUtcDayRange(): { startOfDayUtc: Date; endOfDayUtc: Date } {
+    const now = new Date();
+    const startOfDayUtc = new Date(
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        0,
+        0,
+        0,
+        0,
+      ),
+    );
+    const endOfDayUtc = new Date(
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate() + 1,
+        0,
+        0,
+        0,
+        0,
+      ),
+    );
+    return { startOfDayUtc, endOfDayUtc };
   }
 }
