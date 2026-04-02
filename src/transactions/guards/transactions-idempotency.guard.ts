@@ -25,6 +25,13 @@ export type IdempotencyRequest = Request & {
 const KEY_PREFIX = 'transactions:idempotency:';
 const TRANSFER_USER_LOCK_PREFIX = 'transactions:user-lock:';
 const DEFAULT_IN_FLIGHT_TTL_SECONDS = 180;
+const IDEMPOTENCY_OPERATIONS = {
+  DEPOSIT: 'deposit',
+  WITHDRAW: 'withdraw',
+  TRANSFER: 'transfer',
+} as const;
+type IdempotencyOperation =
+  (typeof IDEMPOTENCY_OPERATIONS)[keyof typeof IDEMPOTENCY_OPERATIONS];
 
 @Injectable()
 export class TransactionsIdempotencyGuard implements CanActivate {
@@ -53,10 +60,23 @@ export class TransactionsIdempotencyGuard implements CanActivate {
     return fromBody || undefined;
   }
 
-  private extractOperation(request: Request): string {
-    const path = request.path ?? '';
-    const parts = path.split('/').filter(Boolean);
-    return parts[parts.length - 1] ?? 'unknown';
+  private extractOperation(
+    request: Request & { body?: { fromAccountId?: unknown; toAccountId?: unknown } },
+  ): IdempotencyOperation {
+    const hasFromAccountId = typeof request.body?.fromAccountId === 'string';
+    const hasToAccountId = typeof request.body?.toAccountId === 'string';
+
+    if (hasFromAccountId && hasToAccountId) {
+      return IDEMPOTENCY_OPERATIONS.TRANSFER;
+    }
+    if (hasFromAccountId) {
+      return IDEMPOTENCY_OPERATIONS.WITHDRAW;
+    }
+    if (hasToAccountId) {
+      return IDEMPOTENCY_OPERATIONS.DEPOSIT;
+    }
+
+    throw new BadRequestException('Unable to infer idempotency operation');
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -65,11 +85,21 @@ export class TransactionsIdempotencyGuard implements CanActivate {
     >();
 
     const userId: string | undefined = request.user?.userId;
+    const referenceIdForLog = this.extractReferenceId(request);
     if (!userId) {
+      this.structuredLogger.warn(
+        TransactionsIdempotencyGuard.name,
+        'Idempotency guard skipped because request user context is missing',
+        {
+          eventType: 'SECURITY',
+          action: 'IDEMPOTENCY_SKIP_MISSING_USER',
+          component: TransactionsIdempotencyGuard.name,
+          fallback: 'skip_idempotency_guard',
+          referenceId: referenceIdForLog,
+        },
+      );
       return true;
     }
-
-    const referenceIdForLog = this.extractReferenceId(request);
 
     if (!this.redis.isReady()) {
       this.structuredLogger.warn(

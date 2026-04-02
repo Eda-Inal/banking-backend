@@ -193,22 +193,41 @@ return {1, nextTotal}
   }
 
   async releaseReservation(input: TransferFraudCheckInput): Promise<void> {
-    const client = this.redis.getClient();
     const { dayBucket, ttlSeconds } = this.getUtcDayMeta();
     const totalKey = `fraud:transfer:daily:${input.userId}:${dayBucket}`;
     const refKey = `fraud:transfer:daily:ref:${input.userId}:${dayBucket}:${input.referenceId}`;
     const releasedKey = `fraud:transfer:daily:released:${input.userId}:${dayBucket}:${input.referenceId}`;
     const releasedTtlSeconds = ttlSeconds + 3600;
 
-    await client.eval(
-      DailyTransferLimitExceededRule.RELEASE_LUA,
-      3,
-      totalKey,
-      refKey,
-      releasedKey,
-      ttlSeconds.toString(),
-      releasedTtlSeconds.toString(),
-    );
+    try {
+      const client = this.redis.getClient();
+      await client.eval(
+        DailyTransferLimitExceededRule.RELEASE_LUA,
+        3,
+        totalKey,
+        refKey,
+        releasedKey,
+        ttlSeconds.toString(),
+        releasedTtlSeconds.toString(),
+      );
+    } catch (err) {
+      this.structuredLogger.warn(
+        DailyTransferLimitExceededRule.name,
+        'Transfer daily reservation release failed, best-effort skip',
+        {
+          eventType: 'INFRA',
+          action: 'RELEASE_TRANSFER_RESERVATION_FAILED',
+          component: DailyTransferLimitExceededRule.name,
+          fallback: 'best_effort_skip_release',
+          userId: input.userId,
+          referenceId: input.referenceId,
+          error:
+            err instanceof Error
+              ? { message: err.message, name: err.name }
+              : { message: String(err) },
+        },
+      );
+    }
   }
 
   private getUtcDayMeta(): { dayBucket: string; ttlSeconds: number } {

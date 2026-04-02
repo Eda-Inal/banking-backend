@@ -166,22 +166,41 @@ return {1, nextTotal}
   }
 
   async releaseReservation(input: WithdrawFraudCheckInput): Promise<void> {
-    const client = this.redis.getClient();
     const { dayBucket, ttlSeconds } = this.getUtcDayMeta();
     const totalKey = `fraud:withdraw:daily:${input.userId}:${dayBucket}`;
     const refKey = `fraud:withdraw:daily:ref:${input.userId}:${dayBucket}:${input.referenceId}`;
     const releasedKey = `fraud:withdraw:daily:released:${input.userId}:${dayBucket}:${input.referenceId}`;
     const releasedTtlSeconds = ttlSeconds + 3600;
 
-    await client.eval(
-      DailyWithdrawLimitExceededRule.RELEASE_LUA,
-      3,
-      totalKey,
-      refKey,
-      releasedKey,
-      ttlSeconds.toString(),
-      releasedTtlSeconds.toString(),
-    );
+    try {
+      const client = this.redis.getClient();
+      await client.eval(
+        DailyWithdrawLimitExceededRule.RELEASE_LUA,
+        3,
+        totalKey,
+        refKey,
+        releasedKey,
+        ttlSeconds.toString(),
+        releasedTtlSeconds.toString(),
+      );
+    } catch (err) {
+      this.structuredLogger.warn(
+        DailyWithdrawLimitExceededRule.name,
+        'Withdraw daily reservation release failed, best-effort skip',
+        {
+          eventType: 'INFRA',
+          action: 'RELEASE_WITHDRAW_RESERVATION_FAILED',
+          component: DailyWithdrawLimitExceededRule.name,
+          fallback: 'best_effort_skip_release',
+          userId: input.userId,
+          referenceId: input.referenceId,
+          error:
+            err instanceof Error
+              ? { message: err.message, name: err.name }
+              : { message: String(err) },
+        },
+      );
+    }
   }
 
   private getUtcDayMeta(): { dayBucket: string; ttlSeconds: number } {

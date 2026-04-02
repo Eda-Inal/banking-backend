@@ -5,7 +5,9 @@ import {
   HttpStatus,
   Injectable,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
+import { CONFIG_KEYS } from '../../config/config';
 import { RedisService } from '../../redis/redis.service';
 import { StructuredLogger } from '../../logger/structured-logger.service';
 
@@ -25,6 +27,7 @@ return count
 
   constructor(
     private readonly redis: RedisService,
+    private readonly config: ConfigService,
     private readonly structuredLogger: StructuredLogger,
   ) {}
 
@@ -69,6 +72,17 @@ return count
           ? request.headers['x-reference-id'].trim()
           : undefined;
     if (!userId) {
+      this.structuredLogger.warn(
+        TransferRateLimitGuard.name,
+        'Transfer rate limit skipped because request user context is missing',
+        {
+          eventType: 'SECURITY',
+          action: 'TRANSFER_RATE_LIMIT_SKIP_MISSING_USER',
+          component: TransferRateLimitGuard.name,
+          fallback: 'skip_rate_limit',
+          referenceId: referenceIdForLog,
+        },
+      );
       return true;
     }
 
@@ -85,9 +99,13 @@ return count
     }
 
     try {
+      const limit =
+        Number(
+          this.config.get(CONFIG_KEYS.TRANSACTIONS_TRANSFER_RATE_LIMIT_PER_MINUTE),
+        ) || DEFAULT_LIMIT_PER_MINUTE;
       const minuteWindow = Math.floor(Date.now() / 60_000);
       const key = `${KEY_PREFIX}${userId}:${minuteWindow}`;
-      await this.checkLimit(key, DEFAULT_LIMIT_PER_MINUTE, userId);
+      await this.checkLimit(key, limit, userId);
       return true;
     } catch (err) {
       if (err instanceof HttpException) {
