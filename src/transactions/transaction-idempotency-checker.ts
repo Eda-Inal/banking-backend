@@ -116,7 +116,7 @@ export class TransactionIdempotencyChecker {
         },
       );
       throw new ConflictException(
-        `${type} transaction is still in progress (referenceId=${referenceId})`,
+        'Transaction request is still in progress',
       );
     }
     this.structuredLogger.warn(
@@ -132,7 +132,7 @@ export class TransactionIdempotencyChecker {
       },
     );
     throw new BadRequestException(
-      `${type} transaction has unexpected status: ${byRef.status}`,
+      'Transaction request could not be processed',
     );
   }
 }

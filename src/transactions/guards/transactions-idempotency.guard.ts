@@ -41,7 +41,7 @@ export class TransactionsIdempotencyGuard implements CanActivate {
     private readonly structuredLogger: StructuredLogger,
   ) {}
 
-  private extractReferenceId(request: Request): string | undefined {
+  private getHeaderReferenceId(request: Request): string | undefined {
     const headerValue = request.headers['x-reference-id'];
     const fromHeader =
       typeof headerValue === 'string'
@@ -49,15 +49,19 @@ export class TransactionsIdempotencyGuard implements CanActivate {
         : Array.isArray(headerValue)
           ? headerValue[0]?.trim()
           : '';
-    if (fromHeader) {
-      return fromHeader;
-    }
+    return fromHeader || undefined;
+  }
 
+  private getBodyReferenceId(request: Request): string | undefined {
     const fromBody =
       typeof (request as any).body?.referenceId === 'string'
         ? (request as any).body.referenceId.trim()
         : '';
     return fromBody || undefined;
+  }
+
+  private extractReferenceId(request: Request): string | undefined {
+    return this.getHeaderReferenceId(request) ?? this.getBodyReferenceId(request);
   }
 
   private extractOperation(
@@ -118,7 +122,20 @@ export class TransactionsIdempotencyGuard implements CanActivate {
     }
 
     try {
-      const referenceId = this.extractReferenceId(request);
+      const headerReferenceId = this.getHeaderReferenceId(request);
+      const bodyReferenceId = this.getBodyReferenceId(request);
+
+      if (
+        headerReferenceId &&
+        bodyReferenceId &&
+        headerReferenceId !== bodyReferenceId
+      ) {
+        throw new BadRequestException(
+          'referenceId in header and body must match',
+        );
+      }
+
+      const referenceId = headerReferenceId ?? bodyReferenceId;
       if (!referenceId) {
         throw new BadRequestException('Missing referenceId');
       }

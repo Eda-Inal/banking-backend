@@ -105,7 +105,7 @@ export class UsersService {
                 action: 'PATCH_PASSWORD',
                 userId: user.id,
             });
-            throw new UnauthorizedException('Invalid old password');
+            throw new UnauthorizedException('Invalid credentials');
         }
 
         if (oldPassword === newPassword) {

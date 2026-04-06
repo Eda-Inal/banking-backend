@@ -308,7 +308,7 @@ export class AuthService {
                 eventType: 'AUTH',
                 action: 'REFRESH',
             });
-            throw new UnauthorizedException('Refresh token is required');
+            throw new UnauthorizedException('Invalid refresh token');
         }
 
         const tokenHash = crypto
@@ -385,7 +385,7 @@ export class AuthService {
                         userId: customer.id,
                         refreshTokenRecordId: refreshTokenRecord.id,
                     });
-                    throw new UnauthorizedException('Refresh token already used');
+                    throw new UnauthorizedException('Invalid refresh token');
                 }
             });
         } catch (err) {

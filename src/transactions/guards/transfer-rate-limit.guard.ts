@@ -56,7 +56,7 @@ return count
         limit,
       });
       throw new HttpException(
-        'Too many transfer attempts. Try again later.',
+        'Too many transaction attempts. Try again later.',
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
