@@ -6,19 +6,29 @@ import { LoginRequestDto } from './dto/login-request.dto';
 import { LoginResponseDto } from './dto/login-response.dto';
 import type { Response, Request, CookieOptions } from 'express';
 import { LoginRateLimitGuard } from './guards/login-rate-limit.guard';
+import { ConfigService } from '@nestjs/config';
+import { CONFIG_KEYS } from '../config/config';
 
 @Controller('auth')
 export class AuthController {
 
-  constructor(private readonly authService: AuthService) { }
+  constructor(
+    private readonly authService: AuthService,
+    private readonly config: ConfigService,
+  ) { }
 
   private getRefreshCookieOptions(): CookieOptions {
+    const nodeEnv = this.config.get<string>(CONFIG_KEYS.NODE_ENV) ?? 'development';
+    const refreshExpiresInSeconds = Number(
+      this.config.get<string>(CONFIG_KEYS.JWT_REFRESH_EXPIRES_IN),
+    );
+
     return {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: nodeEnv === 'production',
       sameSite: 'strict' as const,
       path: '/',
-      maxAge: Number(process.env.JWT_REFRESH_EXPIRES_IN) * 1000,
+      maxAge: refreshExpiresInSeconds * 1000,
     };
   }
 

@@ -12,8 +12,7 @@ import { StructuredLogger } from './structured-logger.service';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
-        const nodeEnv =
-          config.get<string>(CONFIG_KEYS.NODE_ENV) ?? process.env.NODE_ENV ?? 'development';
+        const nodeEnv = config.get<string>(CONFIG_KEYS.NODE_ENV) ?? 'development';
         return buildWinstonModuleOptions(nodeEnv === 'development');
       },
     }),
