@@ -81,6 +81,12 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
         eventType: 'MESSAGING',
         action: 'CONSUMER_STOP',
       });
+    } catch (err) {
+      this.structuredLogger.warn(RabbitMqConsumer.name, 'RabbitMQ consumer stop failed', {
+        eventType: 'MESSAGING',
+        action: 'CONSUMER_STOP_FAILED',
+        failure: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       this.consumerTag = null;
     }

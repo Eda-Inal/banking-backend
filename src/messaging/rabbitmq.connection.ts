@@ -53,17 +53,35 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy(): Promise<void> {
     if (this.publisherChannel) {
-      await this.publisherChannel.close();
+      await this.publisherChannel.close().catch((err: unknown) => {
+        this.structuredLogger.warn(RabbitMqConnection.name, 'RabbitMQ publisher channel close error', {
+          eventType: 'MESSAGING',
+          action: 'RABBITMQ_PUBLISHER_CHANNEL_CLOSE_ERROR',
+          failure: (err as Error)?.message ?? String(err),
+        });
+      });
       this.publisherChannel = null;
     }
 
     if (this.channel) {
-      await this.channel.close();
+      await this.channel.close().catch((err: unknown) => {
+        this.structuredLogger.warn(RabbitMqConnection.name, 'RabbitMQ channel close error', {
+          eventType: 'MESSAGING',
+          action: 'RABBITMQ_CHANNEL_CLOSE_ERROR',
+          failure: (err as Error)?.message ?? String(err),
+        });
+      });
       this.channel = null;
     }
 
     if (this.connection) {
-      await this.connection.close();
+      await this.connection.close().catch((err: unknown) => {
+        this.structuredLogger.warn(RabbitMqConnection.name, 'RabbitMQ connection close error', {
+          eventType: 'MESSAGING',
+          action: 'RABBITMQ_CONNECTION_CLOSE_ERROR',
+          failure: (err as Error)?.message ?? String(err),
+        });
+      });
       this.connection = null;
     }
 
