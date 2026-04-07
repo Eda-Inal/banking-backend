@@ -124,6 +124,19 @@ Main transaction routes:
 
 Most protected routes require JWT authentication.
 
+## Email Delivery (Dev and Production)
+
+- Development default:
+  - `EMAIL_PROVIDER=smtp`
+  - Mail sink: MailHog (`http://localhost:8025`)
+- Production target:
+  - `EMAIL_PROVIDER=sendgrid`
+  - required env: `SENDGRID_API_KEY`, verified `EMAIL_FROM`
+  - DNS requirements: SPF + DKIM
+- Note:
+  - SendGrid transport file exists at `src/notifications/email/sendgrid-email.transport.ts`
+  - It is intentionally a stub and must be implemented before production use.
+
 ## License
 
 UNLICENSED

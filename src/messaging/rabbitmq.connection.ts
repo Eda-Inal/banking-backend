@@ -126,6 +126,12 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
     const dlq =
       this.config.get<string>(CONFIG_KEYS.RABBITMQ_EVENTS_DLQ) ??
       'banking.events.dlq';
+    const emailQueue =
+      this.config.get<string>(CONFIG_KEYS.RABBITMQ_EMAIL_QUEUE) ??
+      'notifications.email.q';
+    const emailDlq =
+      this.config.get<string>(CONFIG_KEYS.RABBITMQ_EMAIL_DLQ) ??
+      'notifications.email.dlq';
 
     await channel.assertExchange(exchange, 'topic', { durable: true });
     await channel.assertExchange(dlx, 'topic', { durable: true });
@@ -136,9 +142,19 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
       deadLetterRoutingKey: 'dead.letter',
     });
     await channel.assertQueue(dlq, { durable: true });
+    await channel.assertQueue(emailQueue, {
+      durable: true,
+      deadLetterExchange: dlx,
+      deadLetterRoutingKey: 'dead.letter.email',
+    });
+    await channel.assertQueue(emailDlq, { durable: true });
 
     await channel.bindQueue(queue, exchange, '#');
     await channel.bindQueue(dlq, dlx, 'dead.letter');
+    await channel.bindQueue(emailQueue, exchange, 'transaction_completed');
+    await channel.bindQueue(emailQueue, exchange, 'transaction_failed');
+    await channel.bindQueue(emailQueue, exchange, 'user_registered');
+    await channel.bindQueue(emailDlq, dlx, 'dead.letter.email');
 
     this.structuredLogger.info(RabbitMqConnection.name, 'RabbitMQ topology ready', {
       eventType: 'MESSAGING',
@@ -147,6 +163,8 @@ export class RabbitMqConnection implements OnModuleInit, OnModuleDestroy {
       queue,
       dlx,
       dlq,
+      emailQueue,
+      emailDlq,
     });
   }
 }

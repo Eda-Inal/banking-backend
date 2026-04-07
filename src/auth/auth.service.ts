@@ -14,7 +14,11 @@ import { JwtPayload } from './jwt-payload.interface';
 import * as crypto from 'crypto';
 import { AccountLockedException } from './exceptions/account-locked.exception';
 import { Prisma } from '../generated/prisma/client';
-import { Action as AuditAction } from '../common/enums';
+import {
+    Action as AuditAction,
+    EventStatus,
+    EventType,
+} from '../common/enums';
 import { RequestContext } from '../common/request-context/request-context';
 import { AuditService } from '../audit/audit.service';
 import { StructuredLogger } from '../logger/structured-logger.service';
@@ -54,7 +58,7 @@ export class AuthService {
     async register(registerRequestDto: RegisterRequestDto): Promise<RegisterResponseDto> {
 
         const { email, password, name, phone } = registerRequestDto;
-        const { clientIpMasked, userAgent } = RequestContext.get();
+        const { clientIpMasked, userAgent, traceId } = RequestContext.get();
 
         const customer = await this.prisma.customer.findUnique({
             where: {
@@ -75,13 +79,33 @@ export class AuthService {
         const hashedPassword = await bcrypt.hash(password, 10);
         let registeredCustomer;
         try {
-            registeredCustomer = await this.prisma.customer.create({
-                data: {
-                    email,
-                    passwordHash: hashedPassword,
-                    name,
-                    phone,
-                },
+            registeredCustomer = await this.prisma.$transaction(async (tx) => {
+                const customer = await tx.customer.create({
+                    data: {
+                        email,
+                        passwordHash: hashedPassword,
+                        name,
+                        phone,
+                    },
+                });
+
+                await tx.event.create({
+                    data: {
+                        type: EventType.USER_REGISTERED,
+                        payload: {
+                            actorId: customer.id,
+                            resourceId: customer.id,
+                            traceId: traceId ?? 'missing-trace-id',
+                            metadata: {
+                                userAgent: userAgent ?? null,
+                                clientIpMasked: clientIpMasked ?? null,
+                            },
+                        },
+                        status: EventStatus.PENDING,
+                    },
+                });
+
+                return customer;
             });
         } catch (err) {
             const isP2002 =

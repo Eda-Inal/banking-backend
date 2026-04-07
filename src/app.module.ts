@@ -16,6 +16,7 @@ import { OutboxModule } from './outbox/outbox.module';
 import { AuditModule } from './audit/audit.module';
 import { LoggerModule } from './logger/logger.module';
 import { RequestContextUserInterceptor } from './common/interceptors/request-context-user.interceptor';
+import { EmailModule } from './notifications/email/email.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { RequestContextUserInterceptor } from './common/interceptors/request-con
     RabbitMqModule,
     OutboxModule,
     AuditModule,
+    EmailModule,
   ],
   controllers: [AppController],
   providers: [

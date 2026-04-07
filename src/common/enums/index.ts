@@ -40,6 +40,7 @@ export enum Action {
 export enum EventType {
     TRANSACTION_COMPLETED = 'TRANSACTION_COMPLETED',
     TRANSACTION_FAILED = 'TRANSACTION_FAILED',
+    USER_REGISTERED = 'USER_REGISTERED',
 }
 
 export enum EventStatus {
