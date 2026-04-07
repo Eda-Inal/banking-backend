@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { TransactionIdempotencyChecker } from './transaction-idempotency-checker';
 import { TransactionStatus, TransactionType } from '../common/enums';
+import { Prisma } from '../generated/prisma/client';
 
 jest.mock('../prisma/prisma.service', () => ({
   PrismaService: class PrismaService {},
@@ -13,10 +14,11 @@ describe('TransactionIdempotencyChecker', () => {
 
   const makeTx = (overrides: Record<string, any> = {}) => ({
     id: 'tx-1',
-    type: 'TRANSFER',
+    type: TransactionType.TRANSFER,
+    actorCustomerId: 'u1',
     fromAccountId: 'from-1',
     toAccountId: 'to-1',
-    amount: { toString: () => '100' },
+    amount: new Prisma.Decimal(100),
     status: TransactionStatus.COMPLETED,
     referenceId: 'ref-1',
     fraudDecision: null,
