@@ -116,7 +116,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
           action: 'CONSUME_DUPLICATE',
           messageId,
         });
-        channel.ack(msg);
+        this.safeAck(channel, msg, 'duplicate');
         return;
       }
       claimedMessageId = messageId;
@@ -125,7 +125,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
       await this.processedMessages.markCompleted(messageId);
       this.metrics.consumed += 1;
       this.metrics.lastMessageAt = new Date().toISOString();
-      channel.ack(msg);
+      this.safeAck(channel, msg, 'success');
       this.structuredLogger.info(RabbitMqConsumer.name, 'Consumer ack', {
         eventType: 'MESSAGING',
         action: 'CONSUME_ACK',
@@ -148,7 +148,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
         const republished = republishForRetry(channel, msg, nextAttempts);
         if (republished) {
           this.metrics.requeued += 1;
-          channel.ack(msg);
+          this.safeAck(channel, msg, 'retry-scheduled');
           this.structuredLogger.warn(RabbitMqConsumer.name, 'Consumer retry scheduled', {
             eventType: 'MESSAGING',
             action: 'CONSUME_RETRY',
@@ -174,7 +174,7 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
         },
         error: error instanceof Error ? error : { message: String(error) },
       });
-      channel.nack(msg, false, requeue);
+      this.safeNack(channel, msg, requeue, messageId);
     }
   }
 
@@ -225,5 +225,37 @@ export class RabbitMqConsumer implements OnModuleInit, OnModuleDestroy {
     if (!value) return fallback;
     const parsed = Number.parseInt(value, 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  }
+
+  private safeAck(channel: Channel, msg: ConsumeMessage, reason: string): void {
+    try {
+      channel.ack(msg);
+    } catch (error) {
+      this.structuredLogger.warn(RabbitMqConsumer.name, 'Consumer ack skipped', {
+        eventType: 'MESSAGING',
+        action: 'CONSUME_ACK_SKIPPED',
+        reason,
+        failure: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private safeNack(
+    channel: Channel,
+    msg: ConsumeMessage,
+    requeue: boolean,
+    messageId: string,
+  ): void {
+    try {
+      channel.nack(msg, false, requeue);
+    } catch (error) {
+      this.structuredLogger.warn(RabbitMqConsumer.name, 'Consumer nack skipped', {
+        eventType: 'MESSAGING',
+        action: 'CONSUME_NACK_SKIPPED',
+        messageId,
+        requeue,
+        failure: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }

@@ -108,14 +108,14 @@ export class EmailConsumer implements OnModuleInit, OnModuleDestroy {
           action: 'CONSUME_DUPLICATE',
           messageId,
         });
-        channel.ack(msg);
+        this.safeAck(channel, msg, 'duplicate');
         return;
       }
       claimedMessageId = messageId;
 
       await this.dispatchEmail(parsed.type, parsed.payload);
       await this.processedMessages.markCompleted(messageId);
-      channel.ack(msg);
+      this.safeAck(channel, msg, 'success');
 
       this.structuredLogger.info(EmailConsumer.name, 'Email consumer ack', {
         eventType: 'EMAIL',
@@ -139,7 +139,7 @@ export class EmailConsumer implements OnModuleInit, OnModuleDestroy {
       if (isTransient && nextAttempts <= this.maxRetries) {
         const republished = republishForRetry(channel, msg, nextAttempts);
         if (republished) {
-          channel.ack(msg);
+          this.safeAck(channel, msg, 'retry-scheduled');
           this.structuredLogger.warn(EmailConsumer.name, 'Email retry scheduled', {
             eventType: 'EMAIL',
             action: 'CONSUME_RETRY',
@@ -164,7 +164,7 @@ export class EmailConsumer implements OnModuleInit, OnModuleDestroy {
         },
         error: error instanceof Error ? error : { message: String(error) },
       });
-      channel.nack(msg, false, requeue);
+      this.safeNack(channel, msg, requeue, messageId);
     }
   }
 
@@ -286,6 +286,38 @@ export class EmailConsumer implements OnModuleInit, OnModuleDestroy {
     if (!value) return fallback;
     const parsed = Number.parseInt(value, 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  }
+
+  private safeAck(channel: Channel, msg: ConsumeMessage, reason: string): void {
+    try {
+      channel.ack(msg);
+    } catch (error) {
+      this.structuredLogger.warn(EmailConsumer.name, 'Email ack skipped', {
+        eventType: 'EMAIL',
+        action: 'CONSUME_ACK_SKIPPED',
+        reason,
+        failure: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private safeNack(
+    channel: Channel,
+    msg: ConsumeMessage,
+    requeue: boolean,
+    messageId: string,
+  ): void {
+    try {
+      channel.nack(msg, false, requeue);
+    } catch (error) {
+      this.structuredLogger.warn(EmailConsumer.name, 'Email nack skipped', {
+        eventType: 'EMAIL',
+        action: 'CONSUME_NACK_SKIPPED',
+        messageId,
+        requeue,
+        failure: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private maskEmail(email: string): string {

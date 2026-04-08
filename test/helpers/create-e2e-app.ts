@@ -10,12 +10,19 @@ import { StructuredLogger } from '../../src/logger/structured-logger.service';
 function applyE2eEnvOverrides(): void {
   const redisTestUrl = process.env.REDIS_URL_TEST?.trim();
   const rabbitTestUrl = process.env.RABBITMQ_URL_TEST?.trim();
+  const emailEnabledTest = process.env.EMAIL_ENABLED_TEST?.trim();
 
   if (redisTestUrl) {
     process.env.REDIS_URL = redisTestUrl;
   }
   if (rabbitTestUrl) {
     process.env.RABBITMQ_URL = rabbitTestUrl;
+  }
+  if (emailEnabledTest) {
+    process.env.EMAIL_ENABLED = emailEnabledTest;
+  } else if (!process.env.EMAIL_ENABLED) {
+    // Keep e2e deterministic on host machines without SMTP/Mailhog.
+    process.env.EMAIL_ENABLED = 'false';
   }
 }
 
